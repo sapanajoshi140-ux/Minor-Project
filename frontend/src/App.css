@@ -6,10 +6,9 @@
  --color-brand-hover: #efede9;
 --color-brand-btn: rgb(45, 45, 45);
  --color-text-dim: #b0aeae;
-
 }
 .navbar {
-  @apply flex justify-between items-center py-5 px-10 text-white;
+  @apply flex justify-between items-center py-2 px-10 text-white;
 }
 .nav-links {
   @apply flex list-none gap-5 m-0 p-0;
@@ -30,6 +29,9 @@
   @apply bg-brand-btn text-text-dim transition-all duration-300;
   @apply hover:text-white hover:scale-105;
 }
-
+/* Custom Utility to hide scrollbars */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
 
 

@@ -1,6 +1,7 @@
 @import "tailwindcss";
-@theme{
---color-brand-bg: rgb(30, 30, 30);
+@theme{ 
+    /* the  brand colors which are used in website  */
+--color-brand-bg: rgb(30, 30, 30);               
 --color-brand-gray: rgb(138, 134, 134);
  --color-brand-hover: #efede9;
 --color-brand-btn: rgb(45, 45, 45);
@@ -8,7 +9,7 @@
 
 }
 .navbar {
-  @apply flex justify-between items-center py-0.5 px-10 text-white;
+  @apply flex justify-between items-center py-5 px-10 text-white;
 }
 .nav-links {
   @apply flex list-none gap-5 m-0 p-0;

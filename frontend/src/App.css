@@ -1,21 +1,13 @@
 @import "tailwindcss";
-@theme{ 
-    /* the  brand colors which are used in website  */
---color-brand-bg: rgb(30, 30, 30);               
---color-brand-gray: rgb(138, 134, 134);
- --color-brand-hover: #efede9;
---color-brand-btn: rgb(45, 45, 45);
- --color-text-dim: #b0aeae;
-}
 .navbar {
-  @apply flex justify-between items-center py-2 px-10 text-white;
+  @apply flex justify-between items-center py-1 px-6 text-white;
 }
 .nav-links {
   @apply flex list-none gap-5 m-0 p-0;
 }
 .nav-link-item {
-  @apply text-brand-gray no-underline font-bold transition-all duration-300;
-  @apply hover:text-brand-hover;
+  @apply text-white no-underline font-bold transition-all duration-300;
+  @apply hover:text-white;
  
 }
 /* Pill Container */
@@ -26,12 +18,6 @@
 /* Shared Button Styles */
 .pill-btn {
   @apply px-6 py-2.5 rounded-full border-none cursor-pointer font-semibold shadow-md;
-  @apply bg-brand-btn text-text-dim transition-all duration-300;
-  @apply hover:text-white hover:scale-105;
+  @apply bg-white text-black transition-all duration-300;
+  @apply hover:text-black hover:scale-105 shadow-xl active:scale-95;
 }
-/* Custom Utility to hide scrollbars */
-.scrollbar-hide::-webkit-scrollbar {
-  display: none;
-}
-
-

@@ -65,12 +65,18 @@ const Picture = ({ title, desc, img }) => {
 
         {/* Button */}
         <motion.button
+            onClick={() => {
+    document.getElementById('footer-section').scrollIntoView({ 
+      behavior:"smooth" 
+    });
+  }}
           className=" text-white bg-gray-900 px-10 py-4 rounded-full text-lg font-bold hover:scale-105 transition-all shadow-xl active:scale-95"
           initial={{ opacity: 0, scale: 0.9 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 1.3, duration: 0.8 }}
           whileHover={{ scale: 1.08 }}
           whileTap={{ scale: 0.95 }}
+       
         >
           Get Started
         </motion.button>
@@ -82,7 +88,7 @@ const Picture = ({ title, desc, img }) => {
 
 const HeroSection = () => {
   return (
-    <div className="px-8 py-4">
+    <div className="px-6 py-1">
       <div className="rounded-[48px]  overflow-hidden">
         <Picture
           title="Read, Understand and Summarize"

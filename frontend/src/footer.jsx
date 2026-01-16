@@ -183,7 +183,7 @@ const Login = ({ img }) => {
 
 const Footer = () => {
   return (
-    <div className="overflow-hidden">
+    <div className="overflow-hidden" id="footer-section">
       <Login 
       img="footer.jpg" />
     </div>

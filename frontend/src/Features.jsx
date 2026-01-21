@@ -269,12 +269,7 @@ const handleSubmit = (e) => {
             </p>
           </div>
         </div>
-      )}
-    
-  
-
-
-          
+      )}     
           </div>
 
         </div>

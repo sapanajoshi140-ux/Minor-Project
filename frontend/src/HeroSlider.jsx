@@ -92,7 +92,7 @@ const HeroSection = () => {
       <div className="rounded-[48px]  overflow-hidden">
         <Picture
           title="Read, Understand and Summarize"
-          desc="Your personal AI powered reading companion"
+          desc="Your AI Powered Reading Companion"
           img="first.png"
         />
       </div>

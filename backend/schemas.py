@@ -4,7 +4,7 @@ from pydantic import BaseModel, EmailStr
 
 class Signup(BaseModel):
     full_name: str
-    email:EmailStr
+    email: EmailStr
     password: str
     confirm_password: str
 
@@ -19,9 +19,13 @@ class GoogleLogin(BaseModel):
     google_access_token: str
 
 class ForgotPassword(BaseModel):
-   email: EmailStr
+    email: EmailStr
 
 class ResetPassword(BaseModel):
     token: str
     new_password: str
     confirm_password: str
+
+# New schema for Resend Verification
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr

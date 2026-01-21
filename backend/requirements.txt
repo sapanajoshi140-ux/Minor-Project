@@ -7,5 +7,7 @@ python-jose
 pydantic
 email-validator
 httpx
-
-
+python-dotenv
+fastapi_mail
+bcrypt
+python-multipart

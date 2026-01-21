@@ -11,7 +11,6 @@ SessionLocal= sessionmaker(bind=engine)
 Base= declarative_base()
 
 class User(Base):
-
     #---------------Users table-------------
 
     __tablename__ = "users"

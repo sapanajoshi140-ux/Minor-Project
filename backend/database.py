@@ -1,9 +1,10 @@
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
-
+from urllib.parse import quote_plus
 # ---------- DATABASE CONFIGURATION ----------
-DATABASE_URL="mysql+pymysql://root:password@localhost:3306/readwithease_db"
+password=quote_plus("sapana@123")
+DATABASE_URL=f"mysql+pymysql://root:{password}@localhost:3306/readwithease_db"
 
 engine = create_engine(DATABASE_URL,pool_pre_ping=True,echo=True)
 SessionLocal= sessionmaker(bind=engine)

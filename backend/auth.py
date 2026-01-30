@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 import bcrypt
-import jwt
+from jose import jwt
 import httpx  # for Google API requests
 
 # ---------- CONFIG ----------

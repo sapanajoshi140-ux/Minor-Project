@@ -42,7 +42,7 @@ const ProtectedRoute = ({ children }) => {
 
 function App() {
   return (
-   <GoogleOAuthProvider clientId="554798712842-14qnfuf9ggu2nhq5csl40830u5i8k9ml.apps.googleusercontent.com">
+   <GoogleOAuthProvider clientId={import.meta.env.VITE_GOOGLE_CLIENT_ID}>
       <BrowserRouter>
         <AuthProvider>
           <Routes>

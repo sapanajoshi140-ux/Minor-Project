@@ -7,7 +7,7 @@ import Footer from "./footer.jsx";
 import Dashboard from "./Dashboard.jsx";
 import { AuthProvider, useAuth } from './Navbar';
 
-// This component represents your entire Landing Page
+// This component represents entire Landing Page
 const LandingPage = () => {
   
   return (

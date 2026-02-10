@@ -1,9 +1,16 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+
+# Rate limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from database import SessionLocal, User
 from schemas import (
@@ -18,13 +25,25 @@ from auth import (
 )
 from email_config import send_email, verify_email_html, reset_email_html
 
+load_dotenv()
+
+# Get environment variables
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
 # ---------- APP ----------
 app = FastAPI(title="Auth Backend")
 
-# ---------- CORS ----------
+# Initialize rate limiter
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ---------- CORS (SECURE) ----------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,  # Whitelisted origins only!
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -61,9 +80,14 @@ def get_current_user(
 
 # ---------- SIGNUP ----------
 @app.post("/signup")
-async def signup(data: Signup, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")  # Rate limiting: 5 signups per minute
+async def signup(request: Request, data: Signup, db: Session = Depends(get_db)):
     if data.password != data.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
+    
+    # Password validation
+    if len(data.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
 
     try:
         user = User(
@@ -75,24 +99,28 @@ async def signup(data: Signup, db: Session = Depends(get_db)):
             created_at=datetime.utcnow()
         )
         db.add(user)
-        db.commit()
-        db.refresh(user)
-
-        # Send verification email (backend link)
+        
+        # Send verification email BEFORE committing
         token = create_email_token(user.email)
-        link = f"http://localhost:8000/verify-email?token={token}"
-
+        link = f"{BACKEND_URL}/verify-email?token={token}"
         await send_email(
             user.email,
             "Verify your email",
             verify_email_html(user.full_name, link)
         )
+        
+        # Only commit if email sent successfully
+        db.commit()
+        db.refresh(user)
 
         return {"message": "Signup successful. Please check your email to verify."}
 
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="Email already registered")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Signup failed. Please try again.")
 
 # ---------- VERIFY EMAIL ----------
 @app.get("/verify-email")
@@ -110,23 +138,23 @@ def verify_email(token: str, db: Session = Depends(get_db)):
         user.is_verified = True
         db.commit()
 
-    # Redirect to frontend login page after verification
-    return RedirectResponse("http://localhost:3000/login")
-
-
+    # Return JSON instead of redirect
+    return {"message": "Email verified successfully!", "redirect": f"{FRONTEND_URL}/login"}
 
 # ---------- RESEND VERIFICATION ----------
 @app.post("/resend-verification")
-async def resend_verification(data: ResendVerificationRequest, db: Session = Depends(get_db)):
+@limiter.limit("3/minute")  # Rate limiting: 3 resends per minute
+async def resend_verification(request: Request, data: ResendVerificationRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
 
+    # Don't reveal if email exists (security)
     if not user:
-        raise HTTPException(status_code=404, detail="Email not registered")
+        return {"message": "If this email is registered, a verification link has been sent."}
     if user.is_verified:
         return {"message": "Email already verified"}
 
     token = create_email_token(user.email)
-    link = f"http://localhost:8000/verify-email?token={token}"
+    link = f"{BACKEND_URL}/verify-email?token={token}"
 
     await send_email(
         user.email,
@@ -134,13 +162,15 @@ async def resend_verification(data: ResendVerificationRequest, db: Session = Dep
         verify_email_html(user.full_name, link)
     )
 
-    return {"message": "Verification email resent"}
+    return {"message": "Verification email sent"}
 
 # ---------- LOGIN ----------
 @app.post("/login")
-def login(data: Login, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")  # Rate limiting: 5 login attempts per minute (prevents brute force)
+async def login(request: Request, data: Login, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
 
+    # Generic error message (don't reveal if email exists)
     if not user or not verify_password(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -157,7 +187,8 @@ def login(data: Login, db: Session = Depends(get_db)):
 
 # ---------- REFRESH ----------
 @app.post("/refresh")
-def refresh(data: RefreshToken):
+@limiter.limit("10/minute")
+async def refresh(request: Request, data: RefreshToken):
     payload = decode_token(data.refresh_token)
 
     if payload.get("type") != "refresh":
@@ -167,14 +198,16 @@ def refresh(data: RefreshToken):
 
 # ---------- FORGOT PASSWORD ----------
 @app.post("/forgot-password")
-async def forgot_password(data: ForgotPassword, db: Session = Depends(get_db)):
+@limiter.limit("3/hour")  # Rate limiting: 3 requests per hour
+async def forgot_password(request: Request, data: ForgotPassword, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
 
+    # Don't reveal if email exists (security)
     if not user:
-        raise HTTPException(status_code=404, detail="Email not registered")
+        return {"message": "If this email is registered, a password reset link has been sent."}
 
     token = create_reset_token(user.email)
-    link = f"http://localhost:8000/reset-password?token={token}"
+    link = f"{FRONTEND_URL}/reset-password?token={token}"
 
     await send_email(
         user.email,
@@ -184,27 +217,23 @@ async def forgot_password(data: ForgotPassword, db: Session = Depends(get_db)):
 
     return {"message": "Reset password link sent to your email"}
 
-
-
 # ---------- RESET PASSWORD ----------
-@app.get("/reset-password")
-def reset_password_get(token: str, db: Session = Depends(get_db)):
-    """Redirect user to frontend reset password page with token"""
-    payload = decode_token(token)
-    user = db.query(User).filter(User.email == payload["sub"]).first()
-
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    return RedirectResponse(f"http://localhost:3000/reset-password?token={token}")
-
 @app.post("/reset-password")
-def reset_password(data: ResetPassword, db: Session = Depends(get_db)):
-    """Update password and redirect to login"""
+@limiter.limit("5/hour")
+async def reset_password(request: Request, data: ResetPassword, db: Session = Depends(get_db)):
+    """Update password"""
     if data.new_password != data.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
+    
+    # Password validation
+    if len(data.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
 
     payload = decode_token(data.token)
+    
+    if payload.get("type") != "reset":
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+    
     user = db.query(User).filter(User.email == payload["sub"]).first()
 
     if not user:
@@ -213,12 +242,12 @@ def reset_password(data: ResetPassword, db: Session = Depends(get_db)):
     user.hashed_password = hash_password(data.new_password)
     db.commit()
 
-    # Redirect to frontend login page after password reset
-    return RedirectResponse("http://localhost:3000/login")
+    return {"message": "Password reset successful"}
 
 # ---------- GOOGLE LOGIN ----------
 @app.post("/google-login")
-async def google_login(data: GoogleLogin, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+async def google_login(request: Request, data: GoogleLogin, db: Session = Depends(get_db)):
     g_user = await get_google_user(data.google_access_token)
     email = g_user.get("email")
 

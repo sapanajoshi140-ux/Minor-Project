@@ -1,0 +1,9 @@
+@import "tailwindcss";
+/* added the background color, font  for whole page */
+body {
+    font-family:sans-serif;
+    background:rgb(239, 246, 255)
+    
+
+}
+

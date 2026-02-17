@@ -1,18 +1,38 @@
-import React, { useState } from 'react';
-import { Upload, FileText, Sparkles, LogOut, ChevronRight } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Upload, FileText, LogOut, ChevronRight } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from './AuthContext';
 import Workspace from './Workspace.jsx';
 
 const Dashboard = () => {
   const navigate = useNavigate();
+  const { logout } = useAuth();
   const [file, setFile] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isProcessed, setIsProcessed] = useState(false);
-  const [dragActive, setDragActive]=useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  
   // Mock text that simulates what the backend would eventually send
   const mockText = "This paragraph explores this paragraph explores the fundamental concepts detected in the uploaded document.Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised in the 1960s with the release of Letraset sheets containing Lorem Ipsum passages, and more recently with desktop publishing software like Aldus PageMaker including versions of Lorem Ipsum.Why do we use ithe fundamental concepts detected in the uploaded document.Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into his paragraph explores the fundamental concepts detected in the uploaded document.Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised in the 1960s with the release of Letraset sheets containing Lorem Ipsum passages, and more recently with desktop publishing software like Aldus PageMaker including versions of Lorem Ipsum.Why do we use itThis paragraph explores this paragraph explores the fundamental concepts detected in the uploaded document.Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised in the 1960s with the release of Letraset sheets containing Lorem Ipsum passages, and more recently with desktop publishing software like Aldus PageMaker including versions of Lorem Ipsum.Why do we use ithe fundamental concepts detected in the uploaded document.Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into his paragraph explores the fundamental concepts detected in the uploaded document.Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised in the 1960s with the release of Letraset sheets containing Lorem Ipsum passages, and more recently with desktop publishing software like Aldus PageMaker including versions of Lorem Ipsum.Why do we use it";
 
-  
+  // ✅ Handle browser back button when in workspace view
+  useEffect(() => {
+    if (!isProcessed) return; // Only add listener when in workspace
+
+    const handleBackButton = (event) => {
+      // User clicked browser back while in workspace - return to upload view
+      setIsProcessed(false);
+      window.history.pushState(null, '', window.location.pathname);
+    };
+
+    // Push state only when entering workspace
+    window.history.pushState(null, '', window.location.pathname);
+    window.addEventListener('popstate', handleBackButton);
+
+    return () => {
+      window.removeEventListener('popstate', handleBackButton);
+    };
+  }, [isProcessed]);
 
   const handleUpload = () => {
     if (!file) return;
@@ -24,23 +44,29 @@ const Dashboard = () => {
       setIsProcessed(true);
     }, 2000);
   };
-  const handleDrag = (e) => {     //drag  handler
-    e.preventDefault();               //by default browser want to open that file in new tab so it  prevents that
+
+  const handleDrag = (e) => {
+    e.preventDefault();
     e.stopPropagation();
     if (e.type === "dragenter" || e.type === "dragover") {
-      setDragActive(true);                      
+      setDragActive(true);
     } else if (e.type === "dragleave") {
       setDragActive(false);
     }
   };
  
-  const handleDrop = (e) => {      //handles drop
-    e.preventDefault();                   
+  const handleDrop = (e) => {
+    e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       setFile(e.dataTransfer.files[0]);
     }
+  };
+
+  const handleLogout = () => {
+    logout();
+    navigate('/', { replace: true });
   };
 
   // IF PROCESSED: Show the Workspace
@@ -50,14 +76,11 @@ const Dashboard = () => {
 
   // ELSE: Show the Upload UI
   return (
-    <div className="flex h-screen bg-neutral-900 ">
+    <div className="flex h-screen bg-neutral-900">
       {/* Sidebar */}
       <aside className="w-72 bg-black/20 backdrop-blur-xl border-r border-white/10 flex flex-col">
         <div className="p-6 border-b border-white/10">
           <div className="flex items-center gap-3">
-           
-             
-           
             <div>
               <h1 className="text-2xl font-bold font-serif text-white">ReadWithEase</h1>
               <p className="text-xs text-gray-400">Your AI-Powered Reading Companion</p>
@@ -66,8 +89,6 @@ const Dashboard = () => {
         </div>
         
         <nav className="flex-1 p-4 space-y-2">
-         
-          
           <button className="w-full p-4 bg-white/5 backdrop-blur-sm border border-white/10 rounded-xl text-white/60 flex items-center gap-3 hover:bg-white/10 hover:text-white transition group">
             <FileText className="w-5 h-5" />
             <span className="font-medium">Recent Files</span>
@@ -76,7 +97,10 @@ const Dashboard = () => {
         </nav>
 
         <div className="p-4 border-t border-white/10">
-          <button className="w-full p-4 bg-red-500/10 backdrop-blur-sm border border-red-500/30 rounded-xl text-red-300 flex items-center gap-3 hover:bg-red-500/20 transition">
+          <button 
+            onClick={handleLogout}
+            className="w-full p-4 bg-red-500/10 backdrop-blur-sm border border-red-500/30 rounded-xl text-red-300 flex items-center gap-3 hover:bg-red-500/20 transition"
+          >
             <LogOut className="w-5 h-5" />
             <span className="font-medium">Logout</span>
           </button>
@@ -88,7 +112,7 @@ const Dashboard = () => {
         <div className="max-w-2xl w-full">
           {/* Header */}
           <div className="text-center mb-8">
-            <h2 className="text-4xl font-bold text-white mb-3 ">
+            <h2 className="text-4xl font-bold text-white mb-3">
               Upload Your Document
             </h2>
             <p className="text-gray-100 text-lg">
@@ -129,7 +153,6 @@ const Dashboard = () => {
                         e.stopPropagation();
                         setFile(null);
                       }}
-                      
                     >
                       <span className="text-red-400 hover:text-white text-xl font-bold leading-none">×</span>
                     </button>
@@ -159,15 +182,13 @@ const Dashboard = () => {
               </div>
             </div>
 
-          
-
             {/* Upload Button */}
             <button
               onClick={handleUpload}
               disabled={!file || isProcessing}
               className={`w-full mt-8 py-4 rounded-xl font-bold text-lg transition-all transform ${
                 isProcessing
-                  ? ' bg-black text-white cursor-wait scale-95'
+                  ? 'bg-black text-white cursor-wait scale-95'
                   : !file
                   ? 'bg-white/5 text-white/30 cursor-not-allowed'
                   : 'bg-gradient-to-r from-gray-800 to-black text-white hover:scale-105 hover:shadow-2xl hover:shadow-gray-500/50'
@@ -183,8 +204,6 @@ const Dashboard = () => {
               )}
             </button>
           </div>
-
-          
         </div>
       </main>
     </div>

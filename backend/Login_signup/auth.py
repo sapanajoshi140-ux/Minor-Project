@@ -1,11 +1,17 @@
 from datetime import datetime, timedelta
 import bcrypt
-from jose import jwt
-import httpx  # for Google API requests
+import jwt
+import httpx
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------- CONFIG ----------
-SECRET_KEY = "your_secret_key_here"  # replace with a secure key
-ALGORITHM = "HS256"
+SECRET_KEY = os.getenv("JWT_SECRET")
+if not SECRET_KEY:
+    raise ValueError("JWT_SECRET not found in environment variables. Check your .env file")
+ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 # ---------- PASSWORD FUNCTIONS ----------
 def hash_password(password: str) -> str:

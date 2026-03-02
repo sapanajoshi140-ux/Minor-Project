@@ -20,6 +20,13 @@ from auth import (
 )
 from email_config import send_email, verify_email_html, reset_email_html
 
+load_dotenv()
+
+# Get environment variables
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+
 # ---------- APP ----------
 app = FastAPI(title="Auth Backend")
 

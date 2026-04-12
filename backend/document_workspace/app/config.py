@@ -35,3 +35,33 @@ TXT_PAGE_CHAR_LIMIT = int(os.getenv("TXT_PAGE_CHAR_LIMIT", "3000"))
 
 # ── Ensure upload dir exists ──────────────────────────────────
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+# ── Logging ───────────────────────────────────────────────────
+import logging
+import sys
+
+def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
+    """Configure root logger. Call once at application startup."""
+    fmt      = "%(asctime)s | %(levelname)-8s | %(name)s — %(message)s"
+    datefmt  = "%Y-%m-%d %H:%M:%S"
+    formatter = logging.Formatter(fmt, datefmt=datefmt)
+
+    handlers: list[logging.Handler] = [_stream_handler(formatter)]
+    if log_file:
+        from pathlib import Path as _Path
+        _Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setFormatter(formatter)
+        handlers.append(fh)
+
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        handlers=handlers,
+        force=True,
+    )
+    for name in ("urllib3", "PIL", "easyocr", "fitz", "multipart"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+def _stream_handler(formatter: logging.Formatter) -> logging.StreamHandler:
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(formatter)
+    return h

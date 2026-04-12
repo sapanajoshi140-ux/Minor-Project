@@ -1,361 +1,297 @@
-import os
-from dotenv import load_dotenv
+"""
+main.py — FastAPI application for document_workspace.
 
-# Load .env FIRST — before any other imports that may read env variables
-load_dotenv()
+All document routes are protected by JWT authentication.
+A user can only see, edit, and delete their own documents.
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Security
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.security.api_key import APIKeyHeader
-from sqlalchemy.orm import Session
-import uuid
+Routes
+------
+POST   /upload                                     — upload & process a document
+GET    /document/{document_id}                     — document metadata
+GET    /document/{document_id}/page/{page_number}  — single OCR page
+GET    /document/{document_id}/pages               — paginated OCR pages
+GET    /document/{document_id}/page/{n}/lines      — NDJSON line stream
+PUT    /document/{document_id}/page/{page_number}  — update OCR page text
+PUT    /document/{document_id}/edit                — bulk-edit OCR pages
+DELETE /document/{document_id}                     — delete document + files
+
+GET    /documents/{document_id}/view               — unified view endpoint
+POST   /documents/{document_id}/generate-pdf       — build / rebuild output PDF
+GET    /document/{document_id}/pdf                 — download viewer-ready PDF
+
+GET    /me/storage                                 — current user's storage usage
+GET    /documents                                  — list all documents for the user
+"""
+
+from __future__ import annotations
+
 import logging
+import os
 from pathlib import Path
 
-# Rate limiting
+from dotenv import load_dotenv
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    Response,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from sqlalchemy.orm import Session
 
-from database import SessionLocal, Document, DocumentPage
+from config import setup_logging
+from datetime import datetime
+from database import (
+    Document,
+    DocumentPage,
+    RevokedToken,
+    SessionLocal,
+    User,
+    USER_STORAGE_LIMIT_BYTES,
+    get_db,
+)
+from dependencies import get_current_user
+from routes.upload import router as upload_router
 from schemas import (
-    UploadResponse,
+    DeleteResponse,
+    DocumentEditRequest,
+    DocumentEditResponse,
     DocumentResponse,
-    PaginatedPagesResponse,
+    DocumentViewResponse,
+    GeneratePdfResponse,
+    OcrLine,
     PageResponse,
     PageUpdateRequest,
     PageUpdateResponse,
-    DeleteResponse,
+    PaginatedPagesResponse,
+    StorageUsageResponse,
+    DocumentListResponse,
 )
-from services.parser_service import FileType, detect_file_type, stream_document
+from services.pdf_generator_service import generate_searchable_pdf
 
-# ---------- LOGGING ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s - %(message)s"
-)
+from contextlib import asynccontextmanager
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
-logging.getLogger("python_multipart").setLevel(logging.WARNING)
-logging.getLogger("multipart").setLevel(logging.WARNING)
+# ── Startup / shutdown ────────────────────────────────────────────────────────
 
-# ---------- ENV ----------
-APP_ENV             = os.getenv("APP_ENV", "development")
-API_KEY             = os.getenv("API_KEY", "").strip()
-CORS_ORIGINS        = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
-UPLOAD_DIR          = os.getenv("UPLOAD_DIR", "uploads")
-MAX_FILE_SIZE_MB    = int(os.getenv("MAX_FILE_SIZE_MB", 50))
-MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
-ALLOWED_EXTENSIONS  = set(os.getenv("ALLOWED_EXTENSIONS", "pdf,doc,docx,ppt,pptx,txt,png,jpg,jpeg").split(","))
-UPLOAD_RATE_LIMIT   = os.getenv("UPLOAD_RATE_LIMIT", "10/minute")
-GET_RATE_LIMIT      = os.getenv("GET_RATE_LIMIT", "30/minute")
-UPDATE_RATE_LIMIT   = os.getenv("UPDATE_RATE_LIMIT", "20/minute")
-DELETE_RATE_LIMIT   = os.getenv("DELETE_RATE_LIMIT", "10/minute")
+def _cleanup_revoked_tokens() -> None:
+    """Delete expired blacklist rows — runs daily via APScheduler."""
+    db = SessionLocal()
+    try:
+        deleted = (
+            db.query(RevokedToken)
+            .filter(RevokedToken.expires_at < datetime.utcnow())
+            .delete()
+        )
+        db.commit()
+        if deleted:
+            logger.info(f"Revoked-token cleanup: removed {deleted} expired row(s).")
+    except Exception as exc:
+        logger.error(f"Revoked-token cleanup failed: {exc}", exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
 
-# How many pages to accumulate before flushing to DB.
-# Lower = more durability (partial saves survive crashes), higher = faster.
-PAGE_COMMIT_BATCH_SIZE = int(os.getenv("PAGE_COMMIT_BATCH_SIZE", "10"))
+_scheduler = AsyncIOScheduler()
 
-if APP_ENV == "production" and not API_KEY:
-    raise RuntimeError("API_KEY must be set in .env when APP_ENV=production")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
+    _scheduler.add_job(_cleanup_revoked_tokens, "interval", hours=24, id="cleanup_revoked")
+    _scheduler.start()
+    logger.info("Startup complete — scheduler running.")
+    yield
+    _scheduler.shutdown(wait=False)
+    logger.info("Shutdown complete.")
 
-Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+CORS_ORIGINS  = os.getenv("CORS_ORIGINS",  "http://localhost:3000").split(",")
 
-# ---------- APP ----------
-app = FastAPI(
-    title="Document OCR API",
-    docs_url    = "/docs"         if APP_ENV != "production" else None,
-    redoc_url   = "/redoc"        if APP_ENV != "production" else None,
-    openapi_url = "/openapi.json" if APP_ENV != "production" else None,
-)
+# ── App ───────────────────────────────────────────────────────────────────────
 
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    from fastapi.openapi.utils import get_openapi
-    schema = get_openapi(title=app.title, version="1.0.0", routes=app.routes)
-    schema["components"]["securitySchemes"] = {
-        "APIKeyHeader": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
-    }
-    for path in schema.get("paths", {}).values():
-        for method in path.values():
-            method.setdefault("security", [{"APIKeyHeader": []}])
-    app.openapi_schema = schema
-    return schema
+app = FastAPI(title="Document Workspace API", lifespan=lifespan)
 
-app.openapi = custom_openapi
-
-# ---------- RATE LIMITER ----------
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# ---------- CORS ----------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ---------- TRUSTED HOST ----------
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=["*"] if APP_ENV != "production" else [
-        h.replace("https://", "").replace("http://", "").split("/")[0]
-        for h in CORS_ORIGINS
-    ],
-)
+app.include_router(upload_router)
 
-# ---------- DATABASE ----------
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
-# ---------- API KEY ----------
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+# ── Ownership guard ───────────────────────────────────────────────────────────
 
-def require_api_key(key: str = Security(api_key_header)):
-    if not API_KEY:
-        logger.debug("API_KEY not set in .env — skipping auth (development mode)")
-        return
-    received = (key or "").strip()
-    if not received:
-        logger.warning("Request rejected — X-API-Key header is missing")
-        raise HTTPException(status_code=403, detail="Invalid or missing API key.")
-    if received != API_KEY:
-        logger.warning("Request rejected — wrong API key received")
-        raise HTTPException(status_code=403, detail="Invalid or missing API key.")
-    logger.debug("API key validated OK")
+def _get_owned_document(
+    document_id: str,
+    db: Session,
+    current_user: User,
+) -> Document:
+    """
+    Return the Document if it exists AND belongs to current_user.
+    Raises 404 for missing documents and for documents owned by other users
+    (we never reveal that another user's document exists).
+    """
+    doc = (
+        db.query(Document)
+        .filter(Document.id == document_id, Document.user_id == current_user.id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return doc
 
-# ---------- GLOBAL EXCEPTION HANDLER ----------
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception [{request.method} {request.url}]: {exc}", exc_info=True)
-    return JSONResponse(status_code=500, content={"detail": "An internal server error occurred."})
 
-# ---------- HEALTH ----------
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+# ── Storage usage ─────────────────────────────────────────────────────────────
 
-# ---------- UPLOAD ----------
-@app.post("/upload", response_model=UploadResponse, status_code=201)
-@limiter.limit(UPLOAD_RATE_LIMIT)
-async def upload_document(
-    request: Request,
-    file: UploadFile = File(...),
+@app.get("/me/storage", response_model=StorageUsageResponse, tags=["User"])
+def get_storage_usage(
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    _: None = Depends(require_api_key),
 ):
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No filename provided.")
-
-    ext = Path(file.filename).suffix.lstrip(".").lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Extension '.{ext}' not allowed. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
-        )
-
-    try:
-        file_type: FileType = detect_file_type(file.filename)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    doc_id = str(uuid.uuid4())
-    stored_filename = f"{doc_id}.{ext}"
-    file_path = Path(UPLOAD_DIR) / stored_filename
-
-    # ── Save file to disk ─────────────────────────────────────────────────────
-    try:
-        total_bytes = 0
-        with open(file_path, "wb") as fh:
-            while chunk := await file.read(65_536):
-                total_bytes += len(chunk)
-                if total_bytes > MAX_FILE_SIZE_BYTES:
-                    fh.close()
-                    file_path.unlink(missing_ok=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File exceeds maximum allowed size of {MAX_FILE_SIZE_MB} MB."
-                    )
-                fh.write(chunk)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"File save error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to save uploaded file.")
-
-    # ── Create pending DB record ──────────────────────────────────────────────
-    document = Document(
-        id=doc_id,
-        filename=file.filename,
-        file_type=file_type.value,
-        file_path=str(file_path),
-        processing_status="processing"
-    )
-    db.add(document)
-    db.commit()
-
-    # ── Process and persist pages ─────────────────────────────────────────────
-    # Pages are batched: a DB commit is issued every PAGE_COMMIT_BATCH_SIZE pages
-    # rather than once per page, reducing round-trips while still giving partial
-    # durability (a crash loses at most PAGE_COMMIT_BATCH_SIZE pages, not all).
-    confidences = []
-    total_pages = 0
-    try:
-        for page in stream_document(str(file_path), file_type):
-            db.add(DocumentPage(
-                document_id=doc_id,
-                page_number=page["page_number"],
-                content=page.get("content"),
-                ocr_type=page.get("ocr_type"),
-                confidence=page.get("confidence"),
-            ))
-            if page.get("confidence") is not None:
-                confidences.append(page["confidence"])
-            total_pages += 1
-
-            # Flush to DB every N pages instead of every single page
-            if total_pages % PAGE_COMMIT_BATCH_SIZE == 0:
-                db.commit()
-                logger.info(f"Document {doc_id} — committed batch up to page {total_pages}.")
-
-        # Final flush for any remaining pages not caught by the batch boundary
-        db.commit()
-        logger.info(f"Document {doc_id} — final page batch committed ({total_pages} total).")
-
-    except Exception as e:
-        logger.error(f"Processing failed for {doc_id}: {e}", exc_info=True)
-        document.processing_status = "failed"
-        db.commit()
-        # FIX: delete the uploaded file so it doesn't orphan on disk
-        file_path.unlink(missing_ok=True)
-        logger.info(f"Cleaned up orphaned file after processing failure: {file_path}")
-        raise HTTPException(status_code=422, detail="Document processing failed.")
-
-    # ── Finalise document record ──────────────────────────────────────────────
-    document.total_pages = total_pages
-    document.average_confidence = (
-        round(sum(confidences) / len(confidences), 4) if confidences else None
-    )
-    document.processing_status = "completed"
-    db.commit()
-
-    logger.info(f"Document {doc_id} completed — {total_pages} page(s).")
-
-    return UploadResponse(
-        document_id=doc_id,
-        message="Document uploaded and processed successfully.",
-        total_pages=total_pages,
-        processing_status="completed"
+    """Return the authenticated user's current storage usage and quota."""
+    db.refresh(current_user)
+    used  = current_user.used_storage_bytes or 0
+    limit = USER_STORAGE_LIMIT_BYTES
+    return StorageUsageResponse(
+        used_bytes=used,
+        limit_bytes=limit,
+        used_mb=round(used / (1024 * 1024), 2),
+        limit_mb=round(limit / (1024 * 1024), 2),
+        available_bytes=max(limit - used, 0),
     )
 
-# ---------- GET DOCUMENT METADATA ----------
-@app.get("/document/{document_id}", response_model=DocumentResponse)
-@limiter.limit(GET_RATE_LIMIT)
+
+# ── Document list ─────────────────────────────────────────────────────────────
+
+@app.get("/documents", response_model=DocumentListResponse, tags=["Documents"])
+@limiter.limit("30/minute")
+def list_documents(
+    request: Request,
+    page: int = 1,
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List all documents belonging to the authenticated user (paginated)."""
+    if limit > 100:
+        limit = 100
+    offset = (page - 1) * limit
+
+    total = (
+        db.query(Document)
+        .filter(Document.user_id == current_user.id)
+        .count()
+    )
+    docs = (
+        db.query(Document)
+        .filter(Document.user_id == current_user.id)
+        .order_by(Document.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return DocumentListResponse(
+        total=total,
+        page=page,
+        limit=limit,
+        documents=[DocumentResponse.model_validate(d) for d in docs],
+    )
+
+
+# ── Document metadata ─────────────────────────────────────────────────────────
+
+@app.get("/document/{document_id}", response_model=DocumentResponse, tags=["Documents"])
+@limiter.limit("30/minute")
 def get_document(
     request: Request,
     document_id: str,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    _: None = Depends(require_api_key),
 ):
-    """
-    Returns document metadata only (no page content).
-    Use /document/{id}/pages or /document/{id}/page/{n} to fetch content.
-    """
-    try:
-        uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format.")
-
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    return document
+    doc = _get_owned_document(document_id, db, current_user)
+    return DocumentResponse.model_validate(doc)
 
 
-# ---------- GET SINGLE PAGE ----------
-@app.get("/document/{document_id}/page/{page_number}", response_model=PageResponse)
-@limiter.limit(GET_RATE_LIMIT)
+# ── Single OCR page ───────────────────────────────────────────────────────────
+
+@app.get(
+    "/document/{document_id}/page/{page_number}",
+    response_model=PageResponse,
+    tags=["Pages"],
+)
+@limiter.limit("60/minute")
 def get_page(
     request: Request,
     document_id: str,
     page_number: int,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    _: None = Depends(require_api_key),
 ):
-    """
-    Returns the content of a single page by its page number (1-based).
-    Ideal for rendering one page at a time in the frontend.
-    """
-    try:
-        uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format.")
+    doc = _get_owned_document(document_id, db, current_user)
 
-    if page_number < 1:
-        raise HTTPException(status_code=400, detail="Page number must be 1 or greater.")
-
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    page = db.query(DocumentPage).filter(
-        DocumentPage.document_id == document_id,
-        DocumentPage.page_number == page_number,
-    ).first()
-    if not page:
+    if doc.document_category == "text":
         raise HTTPException(
-            status_code=404,
-            detail=f"Page {page_number} not found. Document has {document.total_pages} page(s)."
+            status_code=400,
+            detail="Page-level OCR data is only available for scanned documents.",
         )
-    return page
+
+    page = (
+        db.query(DocumentPage)
+        .filter(
+            DocumentPage.document_id == document_id,
+            DocumentPage.page_number == page_number,
+        )
+        .first()
+    )
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found.")
+    return PageResponse.model_validate(page)
 
 
-# ---------- GET PAGES (PAGINATED) ----------
-@app.get("/document/{document_id}/pages", response_model=PaginatedPagesResponse)
-@limiter.limit(GET_RATE_LIMIT)
+# ── Paginated OCR pages ───────────────────────────────────────────────────────
+
+@app.get(
+    "/document/{document_id}/pages",
+    response_model=PaginatedPagesResponse,
+    tags=["Pages"],
+)
+@limiter.limit("30/minute")
 def get_pages(
     request: Request,
     document_id: str,
     page: int = 1,
     limit: int = 10,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    _: None = Depends(require_api_key),
 ):
-    """
-    Returns a paginated slice of pages for a document.
+    doc = _get_owned_document(document_id, db, current_user)
 
-    Query params:
-      page  — which batch to return (1-based, default: 1)
-      limit — how many pages per batch (default: 10, max: 50)
+    if doc.document_category == "text":
+        raise HTTPException(
+            status_code=400,
+            detail="Page-level OCR data is only available for scanned documents.",
+        )
 
-    Example: GET /document/{id}/pages?page=2&limit=5
-      Returns pages 6–10 of the document.
-    """
-    try:
-        uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format.")
-
-    if page < 1:
-        raise HTTPException(status_code=400, detail="page must be 1 or greater.")
-    if not (1 <= limit <= 50):
-        raise HTTPException(status_code=400, detail="limit must be between 1 and 50.")
-
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
+    if limit > 50:
+        limit = 50
     offset = (page - 1) * limit
+
     pages = (
         db.query(DocumentPage)
         .filter(DocumentPage.document_id == document_id)
@@ -364,83 +300,343 @@ def get_pages(
         .limit(limit)
         .all()
     )
-
     return PaginatedPagesResponse(
         document_id=document_id,
-        total_pages=document.total_pages,
+        total_pages=doc.total_pages or 0,
         page=page,
         limit=limit,
-        pages=pages,
+        pages=[PageResponse.model_validate(p) for p in pages],
     )
 
-# ---------- UPDATE PAGE ----------
-@app.put("/document/{document_id}/page/{page_number}", response_model=PageUpdateResponse)
-@limiter.limit(UPDATE_RATE_LIMIT)
+
+# ── NDJSON line stream ────────────────────────────────────────────────────────
+
+@app.get("/document/{document_id}/page/{page_number}/lines", tags=["Pages"])
+@limiter.limit("30/minute")
+def stream_lines(
+    request: Request,
+    document_id: str,
+    page_number: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Stream OCR lines for a single page as NDJSON."""
+    import json
+
+    doc = _get_owned_document(document_id, db, current_user)
+
+    if doc.document_category == "text":
+        raise HTTPException(
+            status_code=400,
+            detail="Line streaming is only available for scanned documents.",
+        )
+
+    page = (
+        db.query(DocumentPage)
+        .filter(
+            DocumentPage.document_id == document_id,
+            DocumentPage.page_number == page_number,
+        )
+        .first()
+    )
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found.")
+
+    def _generate():
+        text = page.extracted_text or ""
+        for line_num, line in enumerate(text.split("\n"), start=1):
+            if line.strip():
+                yield json.dumps({
+                    "page_number":      page_number,
+                    "line_number":      line_num,
+                    "text":             line,
+                    "ocr_type":         page.ocr_type,
+                    "confidence_score": page.confidence_score,
+                }) + "\n"
+
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
+
+
+# ── Update single OCR page ────────────────────────────────────────────────────
+
+@app.put(
+    "/document/{document_id}/page/{page_number}",
+    response_model=PageUpdateResponse,
+    tags=["Pages"],
+)
+@limiter.limit("20/minute")
 def update_page(
     request: Request,
     document_id: str,
     page_number: int,
     data: PageUpdateRequest,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    _: None = Depends(require_api_key),
 ):
-    try:
-        uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format.")
+    doc = _get_owned_document(document_id, db, current_user)
 
-    if page_number < 1:
-        raise HTTPException(status_code=400, detail="Page number must be 1 or greater.")
+    if doc.document_category == "text":
+        raise HTTPException(
+            status_code=400,
+            detail="Only scanned document pages can be edited.",
+        )
 
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    page = db.query(DocumentPage).filter(
-        DocumentPage.document_id == document_id,
-        DocumentPage.page_number == page_number
-    ).first()
+    page = (
+        db.query(DocumentPage)
+        .filter(
+            DocumentPage.document_id == document_id,
+            DocumentPage.page_number == page_number,
+        )
+        .first()
+    )
     if not page:
-        raise HTTPException(status_code=404, detail=f"Page {page_number} not found.")
+        raise HTTPException(status_code=404, detail="Page not found.")
 
-    page.content = data.content
+    page.extracted_text = data.extracted_text
     db.commit()
-    logger.info(f"Page {page_number} of document {document_id} updated.")
 
     return PageUpdateResponse(
         document_id=document_id,
         page_number=page_number,
-        content=page.content,
-        message="Page updated successfully."
+        extracted_text=data.extracted_text,
+        message="Page updated successfully.",
     )
 
-# ---------- DELETE DOCUMENT ----------
-@app.delete("/document/{document_id}", response_model=DeleteResponse)
-@limiter.limit(DELETE_RATE_LIMIT)
+
+# ── Bulk edit ─────────────────────────────────────────────────────────────────
+
+@app.put(
+    "/document/{document_id}/edit",
+    response_model=DocumentEditResponse,
+    tags=["Documents"],
+)
+@limiter.limit("10/minute")
+def bulk_edit_document(
+    request: Request,
+    document_id: str,
+    data: DocumentEditRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    doc = _get_owned_document(document_id, db, current_user)
+
+    if doc.document_category == "text":
+        raise HTTPException(
+            status_code=400,
+            detail="Only scanned document pages can be edited.",
+        )
+
+    updated: list[int] = []
+    skipped: list[int] = []
+
+    for entry in data.pages:
+        page = (
+            db.query(DocumentPage)
+            .filter(
+                DocumentPage.document_id == document_id,
+                DocumentPage.page_number == entry.page_number,
+            )
+            .first()
+        )
+        if page:
+            page.extracted_text = entry.extracted_text
+            updated.append(entry.page_number)
+        else:
+            skipped.append(entry.page_number)
+
+    db.commit()
+    return DocumentEditResponse(
+        document_id=document_id,
+        updated_pages=updated,
+        skipped_pages=skipped,
+        message=f"Updated {len(updated)} page(s); skipped {len(skipped)} page(s).",
+    )
+
+
+# ── Delete document ───────────────────────────────────────────────────────────
+
+@app.delete(
+    "/document/{document_id}",
+    response_model=DeleteResponse,
+    tags=["Documents"],
+)
+@limiter.limit("10/minute")
 def delete_document(
     request: Request,
     document_id: str,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    _: None = Depends(require_api_key),
 ):
-    try:
-        uuid.UUID(document_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid document ID format.")
+    doc = _get_owned_document(document_id, db, current_user)
 
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found.")
+    file_size = doc.file_size_bytes or 0
 
-    file_path = Path(document.file_path)
-    if file_path.exists():
-        file_path.unlink()
-        logger.info(f"Deleted file: {file_path}")
-    else:
-        logger.warning(f"File not found on disk: {file_path}")
+    # Delete files from disk
+    for path_str in (doc.file_path, doc.generated_pdf_path):
+        if path_str:
+            try:
+                Path(path_str).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning(f"Could not delete file '{path_str}': {exc}")
 
-    db.delete(document)
+    # Delete DB record (cascades to DocumentPage rows)
+    db.delete(doc)
+
+    # Decrement user's storage counter
+    current_user.used_storage_bytes = max(
+        (current_user.used_storage_bytes or 0) - file_size, 0
+    )
+
     db.commit()
-    logger.info(f"Document {document_id} deleted.")
+    logger.info(
+        f"Document {document_id} deleted by user {current_user.email}; "
+        f"freed {file_size} bytes."
+    )
+    return DeleteResponse(message="Document deleted successfully.")
 
-    return DeleteResponse(message=f"Document '{document_id}' deleted successfully.")
+
+# ── Unified view ──────────────────────────────────────────────────────────────
+
+@app.get(
+    "/documents/{document_id}/view",
+    response_model=DocumentViewResponse,
+    tags=["Documents"],
+)
+@limiter.limit("30/minute")
+def view_document(
+    request: Request,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    doc = _get_owned_document(document_id, db, current_user)
+
+    if doc.document_category == "text":
+        pdf_url = (
+            f"/document/{document_id}/pdf"
+            if doc.generated_pdf_path
+            else None
+        )
+        return DocumentViewResponse(
+            document_id=document_id,
+            filename=doc.filename,
+            document_category="text",
+            total_pages=doc.total_pages,
+            pdf_url=pdf_url,
+            ocr_lines=[],
+        )
+
+    # Scanned — build line list from all pages
+    pages = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == document_id)
+        .order_by(DocumentPage.page_number)
+        .all()
+    )
+
+    ocr_lines: list[OcrLine] = []
+    for page in pages:
+        for line_num, line in enumerate((page.extracted_text or "").split("\n"), start=1):
+            if line.strip():
+                ocr_lines.append(OcrLine(
+                    page_number=page.page_number,
+                    line_number=line_num,
+                    text=line,
+                    ocr_type=page.ocr_type,
+                    confidence_score=page.confidence_score,
+                ))
+
+    return DocumentViewResponse(
+        document_id=document_id,
+        filename=doc.filename,
+        document_category="scanned",
+        total_pages=doc.total_pages,
+        pdf_url=None,
+        ocr_lines=ocr_lines,
+    )
+
+
+# ── Generate / rebuild PDF ────────────────────────────────────────────────────
+
+@app.post(
+    "/documents/{document_id}/generate-pdf",
+    response_model=GeneratePdfResponse,
+    tags=["Documents"],
+)
+@limiter.limit("5/minute")
+def generate_pdf(
+    request: Request,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    doc = _get_owned_document(document_id, db, current_user)
+
+    if doc.document_category == "text" and doc.generated_pdf_path:
+        return GeneratePdfResponse(
+            document_id=document_id,
+            pdf_url=f"/document/{document_id}/pdf",
+            message="PDF already generated at upload time.",
+        )
+
+    pages = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == document_id)
+        .order_by(DocumentPage.page_number)
+        .all()
+    )
+    pages_data = [
+        {
+            "page_number":      p.page_number,
+            "extracted_text":   p.extracted_text,
+            "ocr_type":         p.ocr_type,
+            "confidence_score": p.confidence_score,
+        }
+        for p in pages
+    ]
+
+    try:
+        pdf_path = generate_searchable_pdf(
+            document_id=document_id,
+            document_category=doc.document_category,
+            original_file_path=doc.file_path,
+            pages=pages_data,
+            original_filename=doc.filename,
+        )
+    except Exception as exc:
+        logger.error(f"PDF generation failed for {document_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail="PDF generation failed.")
+
+    doc.generated_pdf_path = pdf_path
+    db.commit()
+
+    return GeneratePdfResponse(
+        document_id=document_id,
+        pdf_url=f"/document/{document_id}/pdf",
+        message="PDF generated successfully.",
+    )
+
+
+# ── Download PDF ──────────────────────────────────────────────────────────────
+
+@app.get("/document/{document_id}/pdf", tags=["Documents"])
+@limiter.limit("20/minute")
+def download_pdf(
+    request: Request,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    doc = _get_owned_document(document_id, db, current_user)
+
+    if not doc.generated_pdf_path or not Path(doc.generated_pdf_path).exists():
+        raise HTTPException(
+            status_code=404,
+            detail="PDF not available. Use POST /documents/{id}/generate-pdf first.",
+        )
+
+    return FileResponse(
+        path=doc.generated_pdf_path,
+        media_type="application/pdf",
+        filename=f"{Path(doc.filename).stem}.pdf",
+    )

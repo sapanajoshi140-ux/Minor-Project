@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import uuid
 import bcrypt
 import jwt
 import httpx
@@ -15,20 +16,23 @@ ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 # ---------- PASSWORD FUNCTIONS ----------
 def hash_password(password: str) -> str:
-    """Hash a plaintext password."""
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 def verify_password(password: str, hashed: str) -> bool:
-    """Verify a plaintext password against a hash."""
     if not hashed:
         return False
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 # ---------- TOKEN FUNCTIONS ----------
 def create_token(data: dict, expires: timedelta) -> str:
-    """Generic JWT token creator."""
+    """
+    Create a JWT that includes:
+      jti — a unique UUID so the token can be individually revoked.
+      exp — standard expiry timestamp.
+    """
     payload = data.copy()
-    payload['exp'] = datetime.utcnow() + expires
+    payload["jti"] = str(uuid.uuid4())   # unique token ID — used for blacklisting
+    payload["exp"] = datetime.utcnow() + expires
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 def create_access_token(email: str) -> str:
@@ -44,7 +48,7 @@ def create_reset_token(email: str) -> str:
     return create_token({"sub": email, "type": "reset"}, timedelta(minutes=30))
 
 def decode_token(token: str) -> dict:
-    """Decode a JWT token and return the payload."""
+    """Decode and return the JWT payload. Raises on expiry or invalid signature."""
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except jwt.ExpiredSignatureError:
@@ -52,12 +56,10 @@ def decode_token(token: str) -> dict:
     except jwt.InvalidTokenError:
         raise Exception("Invalid token")
 
-# ---------- GOOGLE LOGIN FUNCTION ----------
+# ---------- GOOGLE LOGIN ----------
 async def get_google_user(google_access_token: str) -> dict:
-    """Fetch user info from Google API using access token."""
     url = "https://www.googleapis.com/oauth2/v2/userinfo"
     headers = {"Authorization": f"Bearer {google_access_token}"}
-
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:

@@ -1,20 +1,37 @@
 """
-OCR Service — Tesseract primary, EasyOCR fallback.
+ocr_service.py — OCR routing: Tesseract for printed, TrOCR for handwritten,
+                 with confidence-based fallback.
 
-Strategy:
-  1. Run Tesseract on the preprocessed image.
-  2. If confidence >= OCR_CONFIDENCE_THRESHOLD and text was found → return result.
-  3. Otherwise fall back to EasyOCR (handles handwriting and low-quality scans).
-  4. Return whichever result has the higher confidence score.
+Routing rules (fixed)
+---------------------
+Printed documents  → Tesseract first.
+    If Tesseract confidence >= OCR_HANDWRITTEN_FALLBACK_THRESHOLD (default 0.60)
+        → accept Tesseract result.
+    If confidence < threshold
+        → re-run with TrOCR (handwritten model).
+        → keep whichever result has the higher confidence score.
 
-Install:
-  pip install pytesseract easyocr
-  # Also install the Tesseract binary: https://github.com/UB-Mannheim/tesseract/wiki
+Handwritten documents → TrOCR directly; Tesseract is never called.
+
+Why the threshold matters
+-------------------------
+Tesseract works well on clean, printed scans.  When it returns a confidence
+score below 0.60 it usually means the page is handwritten or mixed, the scan
+quality is very poor, or the content is non-latin / decorative.  In all these
+cases TrOCR often produces a significantly better result.
+
+Configuration
+-------------
+OCR_HANDWRITTEN_FALLBACK_THRESHOLD — confidence floor; default 0.60.
+    Set in .env to tune without code changes.
 """
 
-import os
+from __future__ import annotations
+
 import logging
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
+from typing import List
 
 import pytesseract
 from PIL import Image
@@ -24,77 +41,119 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Read directly from .env — strip accidental quotes/whitespace
-TESSERACT_CMD            = os.getenv("TESSERACT_CMD", "tesseract").strip().strip('"').strip("'")
-OCR_CONFIDENCE_THRESHOLD = float(os.getenv("OCR_CONFIDENCE_THRESHOLD", "0.80"))
+TESSERACT_CMD                      = os.getenv("TESSERACT_CMD", "tesseract").strip().strip('"\'')
+OCR_CONFIDENCE_THRESHOLD           = float(os.getenv("OCR_CONFIDENCE_THRESHOLD", "0.80"))
+OCR_HANDWRITTEN_FALLBACK_THRESHOLD = float(
+    os.getenv("OCR_HANDWRITTEN_FALLBACK_THRESHOLD", "0.60")
+)
 
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
-logger.info(f"Tesseract path set to: {TESSERACT_CMD}")
-logger.info(f"OCR confidence threshold: {OCR_CONFIDENCE_THRESHOLD}")
+logger.info(f"Tesseract path                : {TESSERACT_CMD}")
+logger.info(f"Handwritten fallback threshold: {OCR_HANDWRITTEN_FALLBACK_THRESHOLD}")
 
+
+# ── Result dataclass ──────────────────────────────────────────────────────────
 
 @dataclass
 class OCRResult:
-    text: str
+    text:       str
     confidence: float
-    ocr_type: str           # "digital" | "printed" | "handwritten"
-    word_details: list = field(default_factory=list)
+    ocr_type:   str    # "printed" | "handwritten"
 
+
+# ── Tesseract ─────────────────────────────────────────────────────────────────
 
 def _run_tesseract(image: Image.Image) -> tuple[str, float]:
-    """
-    Run Tesseract OCR on a PIL image.
-    Returns (text, mean_confidence) where confidence is in [0.0, 1.0].
-    """
     try:
         data = pytesseract.image_to_data(
             image,
             output_type=pytesseract.Output.DICT,
             lang="eng",
         )
-        confidences = [
-            int(c)
-            for c in data["conf"]
-            if str(c).lstrip("-").isdigit() and int(c) >= 0
-        ]
-        text = pytesseract.image_to_string(image, lang="eng").strip()
-        mean_conf = (sum(confidences) / len(confidences) / 100.0) if confidences else 0.0
-        return text, round(mean_conf, 4)
+
+        valid_confs: List[float] = []
+        for txt, conf_raw in zip(data["text"], data["conf"]):
+            if not (txt or "").strip():
+                continue
+            try:
+                conf_int = int(conf_raw)
+            except (ValueError, TypeError):
+                continue
+            if conf_int < 0:
+                continue
+            valid_confs.append(conf_int / 100.0)
+
+        full_text = pytesseract.image_to_string(image, lang="eng").strip()
+        mean_conf = (sum(valid_confs) / len(valid_confs)) if valid_confs else 0.0
+        return full_text, round(mean_conf, 4)
+
     except Exception as exc:
-        logger.error(f"Tesseract error: {exc}")
+        logger.error(f"Tesseract error: {exc}", exc_info=True)
         return "", 0.0
 
 
+# ── Public OCR entry points ───────────────────────────────────────────────────
+
+def ocr_printed(image: Image.Image) -> OCRResult:
+    """Run Tesseract only — no fallback. Use ocr_with_fallback() for smart routing."""
+    text, conf = _run_tesseract(image)
+    logger.info(f"Tesseract: confidence={conf:.3f}, chars={len(text)}")
+    return OCRResult(text=text, confidence=conf, ocr_type="printed")
+
+
+def ocr_handwritten(image: Image.Image) -> OCRResult:
+    """Run TrOCR only — for documents classified as handwritten."""
+    from services.handwritten_service import run_trocr, TrOCRResult
+    result: TrOCRResult = run_trocr(image, mode="handwritten")
+    logger.info(f"TrOCR (handwritten): confidence={result.confidence:.3f}")
+    return OCRResult(text=result.text, confidence=result.confidence, ocr_type="handwritten")
+
+
+def ocr_with_fallback(image: Image.Image) -> OCRResult:
+    """
+    Smart OCR for scanned (printed) documents.
+
+    1. Run Tesseract.
+    2. confidence >= OCR_HANDWRITTEN_FALLBACK_THRESHOLD (0.60)  → return.
+    3. confidence <  threshold  → also run TrOCR, keep the better result.
+    """
+    tess_text, tess_conf = _run_tesseract(image)
+    logger.info(f"Tesseract: confidence={tess_conf:.3f}, chars={len(tess_text)}")
+
+    if tess_conf >= OCR_HANDWRITTEN_FALLBACK_THRESHOLD:
+        logger.info(f"Tesseract accepted (conf={tess_conf:.3f}).")
+        return OCRResult(text=tess_text, confidence=tess_conf, ocr_type="printed")
+
+    logger.info(
+        f"Tesseract confidence {tess_conf:.3f} < threshold "
+        f"{OCR_HANDWRITTEN_FALLBACK_THRESHOLD} — falling back to TrOCR."
+    )
+    try:
+        from services.handwritten_service import run_trocr, TrOCRResult
+        hw_result: TrOCRResult = run_trocr(image, mode="handwritten")
+        logger.info(f"TrOCR: confidence={hw_result.confidence:.3f}")
+
+        if hw_result.confidence >= tess_conf:
+            logger.info(f"TrOCR selected (trocr={hw_result.confidence:.3f}).")
+            return OCRResult(
+                text=hw_result.text, confidence=hw_result.confidence, ocr_type="handwritten"
+            )
+        else:
+            logger.info(f"Tesseract kept despite low confidence (better than TrOCR).")
+            return OCRResult(
+                text=tess_text or hw_result.text,
+                confidence=max(tess_conf, hw_result.confidence),
+                ocr_type="printed",
+            )
+
+    except Exception as exc:
+        logger.warning(f"TrOCR fallback failed ({exc}); keeping Tesseract result.")
+        return OCRResult(text=tess_text, confidence=tess_conf, ocr_type="printed")
+
+
+# ── Legacy alias ──────────────────────────────────────────────────────────────
+
 def ocr_image(image: Image.Image) -> OCRResult:
-    """
-    Run Tesseract first. If confidence < threshold → fall back to EasyOCR.
-    Returns the result with the higher confidence score.
-    """
-    printed_text, printed_conf = _run_tesseract(image)
-
-    if printed_conf >= OCR_CONFIDENCE_THRESHOLD and printed_text:
-        logger.info(f"Tesseract accepted — confidence: {printed_conf:.2f}")
-        return OCRResult(text=printed_text, confidence=printed_conf, ocr_type="printed")
-
-    logger.info(
-        f"Tesseract confidence {printed_conf:.2f} < threshold "
-        f"{OCR_CONFIDENCE_THRESHOLD:.2f} — falling back to EasyOCR."
-    )
-
-    from services.handwritten_service import run_easyocr
-    hw_result = run_easyocr(image)
-
-    if hw_result.confidence >= printed_conf:
-        logger.info(f"EasyOCR selected — confidence: {hw_result.confidence:.2f}")
-        return hw_result
-
-    # Tesseract text was better despite low confidence (e.g. mostly-empty page)
-    logger.info(
-        f"Tesseract kept (higher confidence) — "
-        f"tesseract: {printed_conf:.2f}, easyocr: {hw_result.confidence:.2f}"
-    )
-    return OCRResult(
-        text=printed_text or hw_result.text,
-        confidence=max(printed_conf, hw_result.confidence),
-        ocr_type="printed",
-    )
+    """Deprecated — routes to ocr_with_fallback()."""
+    logger.warning("ocr_image() is deprecated. Use ocr_with_fallback() explicitly.")
+    return ocr_with_fallback(image)

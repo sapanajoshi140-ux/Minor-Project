@@ -34,6 +34,7 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Query,
     Request,
     Response,
 )
@@ -55,7 +56,7 @@ from database import (
     USER_STORAGE_LIMIT_BYTES,
     get_db,
 )
-from dependencies import get_current_user
+from dependencies import get_current_user, get_current_user_flexible
 from routes.upload import router as upload_router
 from schemas import (
     DeleteResponse,
@@ -471,7 +472,6 @@ def delete_document(
 
     file_size = doc.file_size_bytes or 0
 
-    # Delete files from disk
     for path_str in (doc.file_path, doc.generated_pdf_path):
         if path_str:
             try:
@@ -479,10 +479,8 @@ def delete_document(
             except OSError as exc:
                 logger.warning(f"Could not delete file '{path_str}': {exc}")
 
-    # Delete DB record (cascades to DocumentPage rows)
     db.delete(doc)
 
-    # Decrement user's storage counter
     current_user.used_storage_bytes = max(
         (current_user.used_storage_bytes or 0) - file_size, 0
     )
@@ -526,7 +524,6 @@ def view_document(
             ocr_lines=[],
         )
 
-    # Scanned — build line list from all pages
     pages = (
         db.query(DocumentPage)
         .filter(DocumentPage.document_id == document_id)
@@ -624,7 +621,7 @@ def generate_pdf(
 def download_pdf(
     request: Request,
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_flexible),
     db: Session = Depends(get_db),
 ):
     doc = _get_owned_document(document_id, db, current_user)
@@ -635,8 +632,20 @@ def download_pdf(
             detail="PDF not available. Use POST /documents/{id}/generate-pdf first.",
         )
 
-    return FileResponse(
-        path=doc.generated_pdf_path,
+    pdf_path = Path(doc.generated_pdf_path)
+    filename = f"{Path(doc.filename).stem}.pdf"
+
+    # Read file and return with inline Content-Disposition so the
+    # browser renders it inside the iframe instead of downloading it
+    with open(pdf_path, "rb") as f:
+        content = f.read()
+
+    return Response(
+        content=content,
         media_type="application/pdf",
-        filename=f"{Path(doc.filename).stem}.pdf",
+        headers={
+            "Content-Disposition": f"inline; filename=\"{filename}\"",
+            "Content-Length": str(len(content)),
+            "Cache-Control": "private, max-age=3600",
+        },
     )

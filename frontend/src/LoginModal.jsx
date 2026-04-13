@@ -59,14 +59,21 @@ const LoginModal = ({ isOpen, onClose, onSwitchToSignup, onSwitchToForgotPasswor
     onSuccess: handleGoogleSuccess,
     onError: () => setError("Google Login Failed"),
   });
+  
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     setSuccess('');
-    setIsLoading(true);
+   
 
-    const result = await login(email, password);
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!email) return setError('Email is required.');
+  if (!emailRegex.test(email)) return setError('Please enter a valid email address.');
+  if (!password) return setError('Password is required.');
+   setIsLoading(true);
+   
+  const result = await login(email, password);
 
     if (result.success) {
       handleClose();

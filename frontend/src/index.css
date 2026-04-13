@@ -6,4 +6,12 @@ body {
     
 
 }
+.react-pdf__Page__textContent {
+  user-select: text;
+  cursor: text;
+}
+
+.react-pdf__Page__canvas {
+  pointer-events: none;
+}
 

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import PdfViewer from './PdfViewer';
 
 const Workspace = ({
   documentId,
@@ -21,7 +22,7 @@ const Workspace = ({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [pdfUrl, setPdfUrl] = useState('');
 
-  // ── Document metadata (live, from GET /document/{id}) ─────────────────────
+  // ── Document metadata ──────────────────────────────────────────────────────
   const [docMeta, setDocMeta] = useState(null);
   const [totalPages, setTotalPages] = useState(totalPagesProp || 0);
 
@@ -30,13 +31,13 @@ const Workspace = ({
   const [pdfGenStatus, setPdfGenStatus] = useState('');
   const [pdfGenMessage, setPdfGenMessage] = useState('');
 
-  // ── Bulk save (PUT /document/{id}/edit) ───────────────────────────────────
-  const [dirtyPages, setDirtyPages] = useState(new Set());   // page_numbers with unsaved edits
+  // ── Bulk save ─────────────────────────────────────────────────────────────
+  const [dirtyPages, setDirtyPages] = useState(new Set());
   const [isBulkSaving, setIsBulkSaving] = useState(false);
-  const [bulkSaveStatus, setBulkSaveStatus] = useState('');  // 'success' | 'error' | ''
+  const [bulkSaveStatus, setBulkSaveStatus] = useState('');
 
   // ── Line-streaming state ───────────────────────────────────────────────────
-  const [streamingPage, setStreamingPage] = useState(null);  // page_number currently streaming
+  const [streamingPage, setStreamingPage] = useState(null);
 
   const scrollRef = useRef(null);
   const bottomRef = useRef(null);
@@ -61,7 +62,7 @@ const Workspace = ({
     );
   };
 
-  // ── GET /document/{id} — fetch/refresh document metadata ──────────────────
+  // ── GET /document/{id} ────────────────────────────────────────────────────
   const fetchDocumentMeta = useCallback(async () => {
     const headers = getFreshHeaders();
     if (!isValidHeaders(headers)) { onAuthError(); return; }
@@ -77,7 +78,6 @@ const Workspace = ({
     }
   }, [documentId, apiUrl, onAuthError]);
 
-  // Fetch metadata on mount so we always have the freshest total_pages / status
   useEffect(() => {
     fetchDocumentMeta();
   }, []);
@@ -90,7 +90,7 @@ const Workspace = ({
     }
   }, [isTextDoc, apiUrl, documentId]);
 
-  // ── Save edited page — marks dirty, then persists via single PUT ──────────
+  // ── Save edited page ───────────────────────────────────────────────────────
   const handleContentChange = async (pageNum, newText) => {
     setPages(prev => {
       const updated = [...prev];
@@ -122,7 +122,7 @@ const Workspace = ({
     }
   };
 
-  // ── PUT /document/{id}/edit — bulk save all dirty pages ───────────────────
+  // ── Bulk save ──────────────────────────────────────────────────────────────
   const handleBulkSave = useCallback(async () => {
     if (dirtyPages.size === 0) return;
     setIsBulkSaving(true);
@@ -147,7 +147,6 @@ const Workspace = ({
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Bulk save failed.');
 
-      // Clear only the pages the backend confirmed as updated
       if (data.updated_pages?.length) {
         setDirtyPages(prev => {
           const next = new Set(prev);
@@ -165,7 +164,7 @@ const Workspace = ({
     }
   }, [dirtyPages, pages, documentId, apiUrl, onAuthError]);
 
-  // ── POST /documents/{id}/generate-pdf ─────────────────────────────────────
+  // ── Generate PDF ───────────────────────────────────────────────────────────
   const handleGeneratePdf = async () => {
     setIsGeneratingPdf(true);
     setPdfGenStatus('');
@@ -199,15 +198,13 @@ const Workspace = ({
     }
   };
 
-  // ── GET /document/{id}/page/{n}/lines — NDJSON streaming ──────────────────
-  // Streams a page line-by-line, appending text progressively for fast display
+  // ── NDJSON streaming ───────────────────────────────────────────────────────
   const fetchPageStreaming = useCallback(async (pageNum) => {
     const headers = getFreshHeaders();
     if (!isValidHeaders(headers)) { onAuthError(); return null; }
 
     setStreamingPage(pageNum);
 
-    // Insert a placeholder so the page card appears immediately
     setPages(prev => {
       if (prev.find(p => p.page_number === pageNum)) return prev;
       return [...prev, { page_number: pageNum, extracted_text: '', _streaming: true }];
@@ -220,11 +217,10 @@ const Workspace = ({
       );
       if (res.status === 401) { onAuthError(); return null; }
 
-      // Fall back to single-page fetch if the endpoint isn't available
       if (!res.ok) {
         setPages(prev => prev.filter(p => p.page_number !== pageNum));
         setStreamingPage(null);
-        return null; // signal caller to use fetchPage instead
+        return null;
       }
 
       const reader = res.body.getReader();
@@ -236,7 +232,7 @@ const Workspace = ({
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        buffer = lines.pop(); // keep incomplete trailing line
+        buffer = lines.pop();
 
         for (const raw of lines) {
           const trimmed = raw.trim();
@@ -258,7 +254,6 @@ const Workspace = ({
         }
       }
 
-      // Mark streaming done
       setPages(prev =>
         prev.map(p => p.page_number === pageNum ? { ...p, _streaming: false } : p)
       );
@@ -272,7 +267,7 @@ const Workspace = ({
     }
   }, [documentId, apiUrl, onAuthError]);
 
-  // ── GET /document/{id}/page/{n} — single page fallback ────────────────────
+  // ── Single page fallback ───────────────────────────────────────────────────
   const fetchPage = useCallback(async (pageNum) => {
     const headers = getFreshHeaders();
     if (!isValidHeaders(headers)) { onAuthError(); return null; }
@@ -285,13 +280,11 @@ const Workspace = ({
     return await res.json();
   }, [documentId, apiUrl, onAuthError]);
 
-  // ── GET /document/{id}/pages — batch prefetch next N pages ────────────────
-  // Called after the first page loads to prefetch the next batch in one request
+  // ── Batch prefetch ─────────────────────────────────────────────────────────
   const prefetchPageBatch = useCallback(async (afterPage, limit = 5) => {
     const headers = getFreshHeaders();
     if (!isValidHeaders(headers)) return;
 
-    // Calculate which batch number contains afterPage + 1
     const nextPageNum = afterPage + 1;
     if (nextPageNum > totalPages) return;
 
@@ -311,7 +304,6 @@ const Workspace = ({
           const newPages = data.pages.filter(p => !existingNums.has(p.page_number));
           return newPages.length ? [...prev, ...newPages] : prev;
         });
-        // Advance currentPage ref to the last prefetched page
         const lastPrefetched = data.pages[data.pages.length - 1].page_number;
         if (lastPrefetched > currentPageRef.current) {
           currentPageRef.current = lastPrefetched;
@@ -323,18 +315,16 @@ const Workspace = ({
     }
   }, [documentId, apiUrl, totalPages]);
 
-  // ── Load next page: stream first, fall back to single fetch ───────────────
+  // ── Load next page ─────────────────────────────────────────────────────────
   const loadNextPage = useCallback(async () => {
     if (isLoadingMore || currentPageRef.current >= totalPages) return;
     setIsLoadingMore(true);
     try {
       const nextPage = currentPageRef.current + 1;
 
-      // 1. Try NDJSON streaming
       const streamed = await fetchPageStreaming(nextPage);
 
       if (streamed === null) {
-        // 2. Streaming not available — fall back to single page fetch
         const pageData = await fetchPage(nextPage);
         if (pageData) {
           setPages(prev => {
@@ -347,7 +337,6 @@ const Workspace = ({
       currentPageRef.current = nextPage;
       setCurrentPage(nextPage);
 
-      // 3. After page 1, kick off a batch prefetch for the next few pages
       if (nextPage === 1) {
         prefetchPageBatch(nextPage);
       }
@@ -362,7 +351,7 @@ const Workspace = ({
     if (!isTextDoc) loadNextPage();
   }, []);
 
-  // IntersectionObserver — only attach after page 1 is loaded
+  // IntersectionObserver for infinite scroll
   useEffect(() => {
     if (!bottomRef.current || isTextDoc || currentPage === 0) return;
     const observer = new IntersectionObserver(
@@ -373,14 +362,17 @@ const Workspace = ({
     return () => observer.disconnect();
   }, [loadNextPage, isTextDoc, currentPage]);
 
-  // Stop speech when leaving workspace
+  // Stop speech when leaving
   useEffect(() => {
     return () => window.speechSynthesis?.cancel();
   }, []);
 
-  // ── Text selection → floating menu ─────────────────────────────────────────
+  // ── Text selection → floating menu ────────────────────────────────────────
+  // Handles BOTH scanned docs (contentEditable divs) and text docs (PDF text layer)
   const handleMouseUp = (e) => {
-    if (e.target.closest('.floating-menu')) return;
+    // Don't trigger if click is inside the floating menu or drawer
+    if (e.target.closest('.floating-menu') || e.target.closest('.workspace-drawer')) return;
+
     const selection = window.getSelection();
     const selectionText = selection?.toString().trim();
 
@@ -401,13 +393,20 @@ const Workspace = ({
     setMenuConfig({
       show: true,
       x: rect.left + rect.width / 2,
-      y: rect.top - 60,
+      y: rect.top - 60,       // 60px above the selection — works for fixed positioning
       type: menuType,
       mode: 'options',
     });
   };
 
-  // ── Word definition ─────────────────────────────────────────────────────────
+  // Hide menu when clicking anywhere else
+  const handleMouseDown = (e) => {
+    if (!e.target.closest('.floating-menu')) {
+      setMenuConfig(prev => ({ ...prev, show: false }));
+    }
+  };
+
+  // ── Word definition ────────────────────────────────────────────────────────
   const handleMeaningClick = async (e) => {
     e.stopPropagation();
     setMenuConfig(prev => ({ ...prev, show: false }));
@@ -437,7 +436,7 @@ const Workspace = ({
     }
   };
 
-  // ── Summarize selection ─────────────────────────────────────────────────────
+  // ── Summarize ──────────────────────────────────────────────────────────────
   const handleSummaryClick = async (e) => {
     e.stopPropagation();
     setMenuConfig(prev => ({ ...prev, show: false }));
@@ -467,7 +466,7 @@ const Workspace = ({
     }
   };
 
-  // ── Text-to-speech ──────────────────────────────────────────────────────────
+  // ── Text-to-speech ─────────────────────────────────────────────────────────
   const handleTTS = (e) => {
     e.stopPropagation();
     setMenuConfig(prev => ({ ...prev, show: false }));
@@ -486,7 +485,7 @@ const Workspace = ({
     window.speechSynthesis.speak(utterance);
   };
 
-  // ── Delete document ─────────────────────────────────────────────────────────
+  // ── Delete document ────────────────────────────────────────────────────────
   const handleDelete = async () => {
     if (!window.confirm('Delete this document? This cannot be undone.')) return;
 
@@ -505,45 +504,65 @@ const Workspace = ({
     }
   };
 
-  // ── Dirty-page indicator label ─────────────────────────────────────────────
   const dirtyCount = dirtyPages.size;
 
   return (
     <div
       className="flex h-screen bg-[#F0F2F5] relative overflow-hidden font-sans"
       onMouseUp={handleMouseUp}
+      onMouseDown={handleMouseDown}
     >
       {/* ── FLOATING MENU ── */}
       {menuConfig.show && (
         <div
-          className="floating-menu fixed z-50 bg-gray-900 text-white rounded-lg shadow-xl border border-gray-800 flex flex-col overflow-hidden"
-          style={{ top: `${menuConfig.y}px`, left: `${menuConfig.x}px`, transform: 'translateX(-50%)' }}
+          className="floating-menu"
+          style={{
+            position: 'fixed',
+            zIndex: 9999,
+            top: `${menuConfig.y}px`,
+            left: `${menuConfig.x}px`,
+            transform: 'translateX(-50%)',
+            background: '#1a1a1a',
+            color: '#fff',
+            borderRadius: '8px',
+            display: 'flex',
+            overflow: 'hidden',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+            border: '1px solid #333',
+          }}
           onMouseUp={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <div className="flex divide-x divide-gray-700 whitespace-nowrap">
+          <div style={{ display: 'flex' }}>
+            {/* Single word → Meaning + Speak */}
             {menuConfig.type === 'word' && (
               <>
-                <button onClick={handleMeaningClick} className="px-4 py-2 text-xs font-semibold hover:bg-gray-800 transition">
-                  Meaning
+                <button onClick={handleMeaningClick} style={menuBtnStyle}>
+                  📖 Meaning
                 </button>
-                <button onClick={handleTTS} className="px-4 py-2 text-xs font-semibold hover:bg-gray-800 transition">
-                  {isSpeaking ? '⏹' : '🔊'}
+                <div style={{ width: 1, background: '#333' }} />
+                <button onClick={handleTTS} style={menuBtnStyle}>
+                  {isSpeaking ? '⏹ Stop' : '🔊 Speak'}
                 </button>
               </>
             )}
+
+            {/* Short phrase → Speak only */}
             {menuConfig.type === 'short' && (
-              <button onClick={handleTTS} className="px-5 py-2 text-xs font-semibold hover:bg-gray-800 transition">
-                {isSpeaking ? 'Stop ⏹' : 'Speak 🔊'}
+              <button onClick={handleTTS} style={menuBtnStyle}>
+                {isSpeaking ? '⏹ Stop' : '🔊 Speak'}
               </button>
             )}
+
+            {/* Long paragraph → Summarize + Read */}
             {menuConfig.type === 'paragraph' && (
               <>
-                <button onClick={handleSummaryClick} className="px-4 py-2 text-xs font-semibold hover:bg-gray-800 flex items-center gap-1 transition">
+                <button onClick={handleSummaryClick} style={menuBtnStyle}>
                   ✨ Summarize
                 </button>
-                <button onClick={handleTTS} className="px-4 py-2 text-xs font-semibold hover:bg-gray-800 transition">
-                  {isSpeaking ? 'Stop ⏹' : 'Read 🔊'}
+                <div style={{ width: 1, background: '#333' }} />
+                <button onClick={handleTTS} style={menuBtnStyle}>
+                  {isSpeaking ? '⏹ Stop' : '🔊 Read'}
                 </button>
               </>
             )}
@@ -567,7 +586,7 @@ const Workspace = ({
 
         <div className="w-8 h-px bg-gray-200 my-2" />
 
-        {/* Bulk save — scanned docs only, shown when there are unsaved edits */}
+        {/* Bulk save — scanned docs only */}
         {!isTextDoc && (
           <div className="relative">
             <button
@@ -589,7 +608,6 @@ const Workspace = ({
                 </svg>
               )}
             </button>
-            {/* Dirty-page badge */}
             {dirtyCount > 0 && !isBulkSaving && (
               <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
                 {dirtyCount}
@@ -642,7 +660,6 @@ const Workspace = ({
                 </span>
               </div>
             )}
-            {/* Document metadata badge — processing status */}
             {docMeta && docMeta.processing_status && docMeta.processing_status !== 'completed' && (
               <div className="bg-amber-50 border border-amber-200 shadow-sm px-3 py-1.5 rounded-full">
                 <span className="text-xs font-medium text-amber-600 capitalize">
@@ -658,7 +675,6 @@ const Workspace = ({
                 Page {currentPage} of {totalPages}
               </span>
             )}
-            {/* Streaming indicator */}
             {streamingPage && (
               <span className="text-xs text-blue-500 font-medium">
                 Streaming p.{streamingPage}…
@@ -696,20 +712,14 @@ const Workspace = ({
           </div>
         )}
 
-        {/* SCROLLABLE CONTENT AREA */}
+        {/* ── SCROLLABLE CONTENT AREA ── */}
         <div
           ref={scrollRef}
           className="flex-1 overflow-y-auto overflow-x-hidden pt-16 pb-20 scroll-smooth"
         >
           {isTextDoc ? (
             pdfUrl ? (
-              <div className="flex flex-col items-center h-full px-4">
-                <iframe
-                  src={`${pdfUrl}#toolbar=1`}
-                  title="Document PDF viewer"
-                  className="w-full max-w-4xl flex-1 min-h-[80vh] border border-gray-200 rounded-xl shadow-sm bg-white"
-                />
-              </div>
+              <PdfViewer pdfUrl={pdfUrl} />
             ) : (
               <div className="flex items-center justify-center h-full">
                 <div className="w-8 h-8 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
@@ -722,7 +732,6 @@ const Workspace = ({
                   <div className="absolute -left-12 top-0 text-xs text-gray-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
                     p.{page.page_number}
                   </div>
-                  {/* Unsaved indicator dot */}
                   {dirtyPages.has(page.page_number) && (
                     <div className="absolute -right-3 top-3 w-2 h-2 bg-blue-400 rounded-full" title="Unsaved changes" />
                   )}
@@ -735,7 +744,6 @@ const Workspace = ({
                     >
                       {page.extracted_text || ''}
                     </div>
-                    {/* Streaming pulse overlay */}
                     {page._streaming && (
                       <div className="absolute bottom-4 right-4 flex items-center gap-1.5 bg-white/80 backdrop-blur-sm px-2 py-1 rounded-full border border-gray-200">
                         <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" />
@@ -772,7 +780,7 @@ const Workspace = ({
 
       {/* ── SUMMARY / MEANING DRAWER ── */}
       <div
-        className={`fixed top-0 right-0 h-full w-[450px] bg-white shadow-2xl border-l border-gray-100 z-[200] transition-transform duration-500 flex flex-col ${
+        className={`workspace-drawer fixed top-0 right-0 h-full w-[450px] bg-white shadow-2xl border-l border-gray-100 z-[200] transition-transform duration-500 flex flex-col ${
           isDrawerOpen ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
@@ -818,6 +826,22 @@ const Workspace = ({
       </div>
     </div>
   );
+};
+
+// Inline style for floating menu buttons
+const menuBtnStyle = {
+  background: 'none',
+  border: 'none',
+  color: '#fff',
+  padding: '8px 14px',
+  fontSize: '12px',
+  fontWeight: '600',
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  gap: '5px',
+  whiteSpace: 'nowrap',
+  fontFamily: 'inherit',
 };
 
 export default Workspace;

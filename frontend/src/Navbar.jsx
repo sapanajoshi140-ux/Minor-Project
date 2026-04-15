@@ -15,7 +15,6 @@ const Navbar = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // ✅ Check for showLogin query parameter
   useEffect(() => {
     if (searchParams.get('showLogin') === 'true') {
       setShowLogin(true);

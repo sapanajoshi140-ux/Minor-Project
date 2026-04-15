@@ -23,3 +23,11 @@
   @apply bg-gray-800 text-white transition-all duration-300;
   @apply hover:text-white hover:scale-105 shadow-xl active:scale-95;
 }
+.react-pdf__Page__textContent {
+  user-select: text;
+  cursor: text;
+}
+
+.react-pdf__Page {
+  position: relative;
+}

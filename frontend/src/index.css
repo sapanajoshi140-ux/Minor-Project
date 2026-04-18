@@ -1,9 +1,22 @@
 @import "tailwindcss";
-/* added the background color, font  for whole page */
-body {
-    font-family:sans-serif;
-    background:rgb(239, 246, 255)
-    
 
+body {
+  font-family: sans-serif;
+  background: rgb(239, 246, 255);
 }
 
+/* ── PDF.js text layer ── */
+.pdf-text-layer span,
+.pdf-text-layer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+
+.pdf-text-layer span::selection {
+  background: rgba(59, 130, 246, 0.3);
+  color: transparent;
+}

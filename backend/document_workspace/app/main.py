@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -80,6 +81,12 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
+
+# ── RAG path setup ────────────────────────────────────────────────────────────
+_APP_DIR = Path(__file__).resolve().parent          # document_workspace/app
+_RAG_DIR = _APP_DIR.parent / "rag"                  # document_workspace/rag
+if str(_RAG_DIR) not in sys.path:
+    sys.path.insert(0, str(_RAG_DIR))
 
 logger = logging.getLogger(__name__)
 
@@ -520,6 +527,15 @@ def delete_document(
     )
 
     db.commit()
+
+    # ── Remove RAG chunks for this document ───────────────────────────────────
+    try:
+        from rag.ingest import delete_document as rag_delete
+        rag_delete(document_id)
+        logger.info(f"Document {document_id} — RAG chunks deleted.")
+    except Exception as exc:
+        logger.warning(f"RAG chunk deletion failed for {document_id}: {exc}")
+
     logger.info(
         f"Document {document_id} deleted by user {current_user.email}; "
         f"freed {file_size} bytes."

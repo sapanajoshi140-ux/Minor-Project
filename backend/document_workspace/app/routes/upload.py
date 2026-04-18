@@ -17,6 +17,7 @@ Auth & quota
 
 import logging
 import os
+import sys
 import uuid
 from pathlib import Path
 
@@ -35,6 +36,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Upload"])
 
 PAGE_COMMIT_BATCH_SIZE = int(os.getenv("PAGE_COMMIT_BATCH_SIZE", "10"))
+
+# ── RAG path setup ────────────────────────────────────────────────────────────
+_APP_DIR = Path(__file__).resolve().parent.parent   # document_workspace/app
+_RAG_DIR = _APP_DIR.parent / "rag"                  # document_workspace/rag
+
+if str(_RAG_DIR) not in sys.path:
+    sys.path.insert(0, str(_RAG_DIR))
 
 
 @router.post(
@@ -181,7 +189,29 @@ async def upload_document(
     except Exception as exc:
         logger.error(f"PDF generation failed for {doc_id}: {exc}", exc_info=True)
 
-    # ── 8. Finalise document record + update quota counter ────────────────────
+    # ── 8. Ingest into RAG ────────────────────────────────────────────────────
+    try:
+        import importlib
+        _rag_ingest = importlib.import_module("ingest")
+        ingest_from_db_pages  = _rag_ingest.ingest_from_db_pages
+        ingest_from_file_path = _rag_ingest.ingest_from_file_path
+
+        if document_category == "text":
+            # Pure text doc — chunk directly from original file
+            rag_result = ingest_from_file_path(doc_id, str(file_path))
+        else:
+            # Scanned doc — chunk from OCR text already in all_pages
+            rag_result = ingest_from_db_pages(doc_id, all_pages)
+
+        logger.info(
+            f"Document {doc_id} — RAG ingested: "
+            f"{rag_result['chunks']} chunks from {rag_result['pages']} page(s)."
+        )
+    except Exception as exc:
+        # RAG failure must NOT fail the upload — document is already saved
+        logger.error(f"RAG ingestion failed for {doc_id}: {exc}", exc_info=True)
+
+    # ── 9. Finalise document record + update quota counter ────────────────────
     document.total_pages        = total_pages
     document.average_confidence = (
         round(sum(confidences) / len(confidences), 4) if confidences else None

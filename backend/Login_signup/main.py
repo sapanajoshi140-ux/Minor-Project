@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer
+from fastapi.openapi.utils import get_openapi
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
@@ -58,7 +60,37 @@ async def lifespan(app: FastAPI):
     _scheduler.shutdown(wait=False)
 
 # ---------- APP ----------
-app = FastAPI(title="Auth Backend", lifespan=lifespan)
+security = HTTPBearer()
+
+app = FastAPI(
+    title="Auth Backend",
+    lifespan=lifespan,
+    swagger_ui_parameters={"persistAuthorization": True},
+)
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title="Auth Backend",
+        version="0.1.0",
+        routes=app.routes,
+    )
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "Paste your access_token from POST /login here.",
+        }
+    }
+    for path in schema.get("paths", {}).values():
+        for operation in path.values():
+            operation["security"] = [{"BearerAuth": []}]
+    app.openapi_schema = schema
+    return schema
+
+app.openapi = custom_openapi
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
@@ -103,7 +135,7 @@ def _revoke(payload: dict, db: Session) -> None:
 
 # ---------- CURRENT USER ----------
 def get_current_user(
-    authorization: str = Header(...),
+    authorization: str = Header(..., include_in_schema=False),
     db: Session = Depends(get_db),
 ) -> User:
     """Validate Bearer token and return the authenticated User."""
@@ -220,8 +252,8 @@ async def login(request: Request, data: Login, db: Session = Depends(get_db)):
 @limiter.limit("10/minute")
 async def logout(
     request: Request,
-    data: RefreshToken,                      # expects {"refresh_token": "..."}
-    authorization: str = Header(...),
+    data: RefreshToken,
+    authorization: str = Header(..., include_in_schema=False),
     db: Session = Depends(get_db),
 ):
     """

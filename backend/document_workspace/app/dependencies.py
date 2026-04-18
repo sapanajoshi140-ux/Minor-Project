@@ -60,7 +60,7 @@ def _get_user_from_token(raw_token: str, db: Session) -> User:
 
 
 def get_current_user(
-    authorization: str = Header(..., description="Bearer <access_token>"),
+    authorization: str = Header(..., include_in_schema=False),
     db: Session = Depends(get_db),
 ) -> User:
     parts = authorization.split(" ")
@@ -73,7 +73,7 @@ def get_current_user(
 
 
 def get_current_user_flexible(
-    authorization: str | None = Header(default=None),
+    authorization: str | None = Header(default=None, include_in_schema=False),
     token: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> User:

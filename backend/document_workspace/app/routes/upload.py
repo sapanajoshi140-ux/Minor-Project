@@ -51,11 +51,11 @@ async def upload_document(
     """
     Full pipeline:
     1. Validate extension
-    2. Enforce per-user 500 MB storage quota
+    2. Enforce per-user 100 MB storage quota
     3. Save to disk
     4. Classify: "text" or "scanned"
     5. Extract / OCR all pages (streamed to DB in batches)
-    6. Generate searchable PDF
+    6. Generate  PDF
     7. Finalise document record and update user storage counter
     """
 

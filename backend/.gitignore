@@ -24,6 +24,8 @@ document_workspace/app/uploads/*
 uploads/*
 !uploads/.gitkeep
 document_workspace/models/*
+document_workspace/app/generated_pdfs
+document_workspace/rag/data
 
 # ── EasyOCR model weights (~200 MB — never commit) ───────────
 document_workspace/app/.easyocr_models/

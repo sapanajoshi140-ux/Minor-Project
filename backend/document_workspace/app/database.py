@@ -40,7 +40,7 @@ load_dotenv()
 
 # ── Storage quota ─────────────────────────────────────────────────────────────
 USER_STORAGE_LIMIT_BYTES = int(
-    os.getenv("USER_STORAGE_LIMIT_BYTES", str(500 * 1024 * 1024))  # 500 MB
+    os.getenv("USER_STORAGE_LIMIT_BYTES")  
 )
 
 # ── Connection ────────────────────────────────────────────────────────────────

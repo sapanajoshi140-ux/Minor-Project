@@ -114,8 +114,8 @@ async def lifespan(app: FastAPI):
     _scheduler.shutdown(wait=False)
     logger.info("Shutdown complete.")
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
-CORS_ORIGINS  = os.getenv("CORS_ORIGINS",  "http://localhost:3000").split(",")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+CORS_ORIGINS  = os.getenv("CORS_ORIGINS",  "http://localhost:5173").split(",")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 

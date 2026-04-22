@@ -699,3 +699,80 @@ def download_pdf(
             "Cache-Control": "private, max-age=3600",
         },
     )
+
+# ── Dictionary — Meaning ──────────────────────────────────────────────────────
+
+from pydantic import BaseModel
+
+class WordMeaningResponse(BaseModel):
+    word:    str
+    meaning: str
+    synonym: str
+    example: str
+    source:  str
+
+@app.get(
+    "/dictionary/{word}/meaning",
+    response_model=WordMeaningResponse,
+    tags=["Dictionary"],
+    summary="Get meaning, synonym and example for a word",
+)
+@limiter.limit("30/minute")
+def word_meaning(
+    request: Request,
+    word: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Look up a word:
+    - Checks the local MySQL dictionary table first (fast indexed lookup).
+    - Falls back to the free dictionary API if not cached, then saves it.
+    - Returns meaning, synonym, and example if available.
+    - No audio — pronunciation is handled by the frontend (Web Speech API).
+    """
+    from wordlogic import get_meaning
+    result = get_meaning(word)
+    if result["source"] == "Error":
+        raise HTTPException(status_code=404, detail=f"No definition found for '{word}'.")
+    return WordMeaningResponse(**result)
+
+
+# ── Dictionary — Pronunciation ────────────────────────────────────────────────
+
+@app.get(
+    "/dictionary/{word}/pronounce",
+    tags=["Dictionary"],
+    summary="Stream pronunciation audio for a word or phrase",
+)
+@limiter.limit("30/minute")
+def word_pronounce(
+    request: Request,
+    word: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Generate and stream MP3 pronunciation audio for the given word.
+    - No database interaction whatsoever.
+    - Audio is generated in memory via gTTS and streamed back.
+    - Frontend plays the response as an audio blob.
+
+    Frontend usage:
+        const res = await fetch(`/dictionary/${word}/pronounce`, { headers: { Authorization: ... } });
+        const blob = await res.blob();
+        const audio = new Audio(URL.createObjectURL(blob));
+        audio.play();
+    """
+    from wordlogic import pronounce_word
+    import io
+    from gtts import gTTS
+
+    tts = gTTS(text=word.strip(), lang="en")
+    mp3_buffer = io.BytesIO()
+    tts.write_to_fp(mp3_buffer)
+    mp3_buffer.seek(0)
+
+    return StreamingResponse(
+        mp3_buffer,
+        media_type="audio/mpeg",
+        headers={"Content-Disposition": f"inline; filename=\"{word}.mp3\""},
+    )

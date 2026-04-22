@@ -737,12 +737,13 @@ def word_meaning(
     return WordMeaningResponse(**result)
 
 
-# ── Dictionary — Pronunciation ────────────────────────────────────────────────
+
+# ── Dictionary — Pronunciation ──────────────────────────────────────────────────────────────────────────────
 
 @app.get(
     "/dictionary/{word}/pronounce",
     tags=["Dictionary"],
-    summary="Stream pronunciation audio for a word or phrase",
+    summary="Stream pronunciation audio and return phonetic text for a word",
 )
 @limiter.limit("30/minute")
 def word_pronounce(
@@ -751,28 +752,32 @@ def word_pronounce(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Generate and stream MP3 pronunciation audio for the given word.
+    Returns MP3 audio stream + phonetic text for the given word.
     - No database interaction whatsoever.
-    - Audio is generated in memory via gTTS and streamed back.
-    - Frontend plays the response as an audio blob.
+    - Audio is streamed back as audio/mpeg.
+    - Phonetic text (e.g. /prə-nʌnsɪeɪʃən/) is returned in the
+      `X-Phonetic` response header.
 
     Frontend usage:
-        const res = await fetch(`/dictionary/${word}/pronounce`, { headers: { Authorization: ... } });
+        const res = await fetch(`/dictionary/${word}/pronounce`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        const phonetic = res.headers.get("X-Phonetic"); // e.g. /nɛbjʊlə/
         const blob = await res.blob();
         const audio = new Audio(URL.createObjectURL(blob));
         audio.play();
     """
-    from wordlogic import pronounce_word
-    import io
-    from gtts import gTTS
+    from wordlogic import get_phonetic, get_pronunciation_audio
 
-    tts = gTTS(text=word.strip(), lang="en")
-    mp3_buffer = io.BytesIO()
-    tts.write_to_fp(mp3_buffer)
-    mp3_buffer.seek(0)
+    phonetic   = get_phonetic(word)
+    mp3_buffer = get_pronunciation_audio(word)
 
     return StreamingResponse(
         mp3_buffer,
         media_type="audio/mpeg",
-        headers={"Content-Disposition": f"inline; filename=\"{word}.mp3\""},
+        headers={
+            "Content-Disposition":           f'inline; filename="{word}.mp3"',
+            "X-Phonetic":                    phonetic,
+            "Access-Control-Expose-Headers": "X-Phonetic",
+        },
     )

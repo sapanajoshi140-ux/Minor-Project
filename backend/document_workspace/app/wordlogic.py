@@ -184,3 +184,50 @@ def pronounce_paragraph(text: str) -> None:
     _speak(text.strip())
 
 
+
+def get_phonetic(word: str) -> str:
+    """
+    Fetch the phonetic text (e.g. /prə-nŭn″sē-ā′shən/) for a word
+    from the free dictionary API.
+    Returns an empty string if not available — never raises.
+    No database interaction.
+    """
+    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word.lower().strip()}"
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code != 200:
+            return ""
+
+        entry = response.json()[0]
+
+        # Top-level phonetic field (most common)
+        phonetic = entry.get("phonetic", "")
+        if phonetic:
+            return phonetic
+
+        # Fallback: first phonetic object with text
+        for p in entry.get("phonetics", []):
+            if p.get("text"):
+                return p["text"]
+
+    except Exception:
+        pass
+
+    return ""
+
+
+def get_pronunciation_audio(word: str) -> io.BytesIO:
+    """
+    Generate pronunciation audio for a word or paragraph and return
+    it as an in-memory MP3 buffer.
+    No database interaction, no file saved.
+
+    Usage in endpoint:
+        audio = get_pronunciation_audio(word)
+        return StreamingResponse(audio, media_type="audio/mpeg")
+    """
+    tts = gTTS(text=word.strip(), lang="en")
+    mp3_buffer = io.BytesIO()
+    tts.write_to_fp(mp3_buffer)
+    mp3_buffer.seek(0)
+    return mp3_buffer

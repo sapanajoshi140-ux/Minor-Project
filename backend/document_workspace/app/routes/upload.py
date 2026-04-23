@@ -188,6 +188,7 @@ async def upload_document(
         logger.info(f"Document {doc_id} — searchable PDF: {generated_pdf_path}")
     except Exception as exc:
         logger.error(f"PDF generation failed for {doc_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
 
     # ── 8. Ingest into RAG ────────────────────────────────────────────────────
     try:

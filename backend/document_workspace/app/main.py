@@ -767,17 +767,22 @@ def word_pronounce(
         const audio = new Audio(URL.createObjectURL(blob));
         audio.play();
     """
+    from urllib.parse import quote
     from wordlogic import get_phonetic, get_pronunciation_audio
 
     phonetic   = get_phonetic(word)
     mp3_buffer = get_pronunciation_audio(word)
+
+    # Phonetic strings contain Unicode (e.g. /həˈloʊ/) which cannot be
+    # encoded as latin-1 headers. URL-encode so it stays ASCII-safe.
+    safe_phonetic = quote(phonetic, safe="/ˈˌ") if phonetic else ""
 
     return StreamingResponse(
         mp3_buffer,
         media_type="audio/mpeg",
         headers={
             "Content-Disposition":           f'inline; filename="{word}.mp3"',
-            "X-Phonetic":                    phonetic,
+            "X-Phonetic":                    safe_phonetic,
             "Access-Control-Expose-Headers": "X-Phonetic",
         },
     )

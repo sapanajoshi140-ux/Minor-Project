@@ -1,8 +1,9 @@
+import asyncio
 import os
-import requests
 import io
+import requests
 import pygame
-from gtts import gTTS
+import edge_tts
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, Column, String, Text
 from sqlalchemy.orm import declarative_base, Session
@@ -97,7 +98,8 @@ def get_meaning(word: str) -> dict:
       1. Search the MySQL `dictionary` table (indexed on `word`).
       2. If not found, fetch from the API, persist it, then return it.
 
-    Returns: { word, meaning, synonym, example, source }
+    Returns: { word, meaning, synonym?, example?, source }
+    synonym and example are only present in the dict when they have a value.
     No audio — pronunciation is handled separately.
     """
     word = word.lower().strip()
@@ -106,13 +108,16 @@ def get_meaning(word: str) -> dict:
         row = session.get(Dictionary, word)
 
         if row:
-            return {
+            result = {
                 "word":    row.word,
                 "meaning": row.meaning or "Meaning not found.",
-                "synonym": row.synonym or "",
-                "example": row.example or "",
                 "source":  "Database",
             }
+            if row.synonym:
+                result["synonym"] = row.synonym
+            if row.example:
+                result["example"] = row.example
+            return result
 
         api_data = _fetch_from_api(word)
 
@@ -120,43 +125,62 @@ def get_meaning(word: str) -> dict:
             session.add(Dictionary(
                 word    = word,
                 meaning = api_data["meaning"],
-                synonym = api_data["synonym"],
-                example = api_data["example"],
+                synonym = api_data["synonym"] or None,
+                example = api_data["example"] or None,
             ))
             session.commit()
 
-            return {
+            result = {
                 "word":    word,
                 "meaning": api_data["meaning"],
-                "synonym": api_data["synonym"],
-                "example": api_data["example"],
                 "source":  "API (Learned Word)",
             }
+            if api_data["synonym"]:
+                result["synonym"] = api_data["synonym"]
+            if api_data["example"]:
+                result["example"] = api_data["example"]
+            return result
 
         return {
             "word":    word,
             "meaning": "Meaning not found.",
-            "synonym": "",
-            "example": "",
             "source":  "Error",
         }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PRONUNCIATION FUNCTIONS  (audio only — no DB interaction)
+# PRONUNCIATION FUNCTIONS  (Edge TTS — neural voices, free, no API key)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# Change voice here if you want a different one:
+#   en-US-JennyNeural      — natural female (US)
+#   en-US-GuyNeural        — natural male   (US)
+#   en-GB-SoniaNeural      — natural female (British)
+#   en-GB-RyanNeural       — natural male   (British)
+TTS_VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
+
+
+async def _edge_tts_to_buffer(text_to_speak: str) -> io.BytesIO:
+    """
+    Async helper — generates audio via Edge TTS and returns an in-memory MP3 buffer.
+    No file saved to disk, no API key needed.
+    """
+    communicate = edge_tts.Communicate(text_to_speak.strip(), voice=TTS_VOICE)
+    mp3_buffer  = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            mp3_buffer.write(chunk["data"])
+    mp3_buffer.seek(0)
+    return mp3_buffer
+
 
 def _speak(text_to_speak: str) -> None:
     """
-    Internal helper — generates audio via gTTS and plays it in memory.
+    Internal helper — generates audio via Edge TTS and plays it with pygame.
     Works for both single words and full paragraphs.
-    No file is saved to disk.
+    No file saved to disk.
     """
-    tts = gTTS(text=text_to_speak, lang="en")
-
-    mp3_buffer = io.BytesIO()
-    tts.write_to_fp(mp3_buffer)
-    mp3_buffer.seek(0)
+    mp3_buffer = asyncio.run(_edge_tts_to_buffer(text_to_speak))
 
     pygame.mixer.init()
     pygame.mixer.music.load(mp3_buffer, "mp3")
@@ -170,7 +194,7 @@ def _speak(text_to_speak: str) -> None:
 
 def pronounce_word(word: str) -> None:
     """
-    Speak a single word aloud.
+    Speak a single word aloud using Edge TTS neural voice.
     No database interaction whatsoever.
     """
     _speak(word.strip())
@@ -178,16 +202,15 @@ def pronounce_word(word: str) -> None:
 
 def pronounce_paragraph(text: str) -> None:
     """
-    Speak a full paragraph or any length of text aloud.
+    Speak a full paragraph or any length of text aloud using Edge TTS.
     No database interaction whatsoever.
     """
     _speak(text.strip())
 
 
-
 def get_phonetic(word: str) -> str:
     """
-    Fetch the phonetic text (e.g. /prə-nŭn″sē-ā′shən/) for a word
+    Fetch the phonetic text (e.g. /həˈloʊ/) for a word
     from the free dictionary API.
     Returns an empty string if not available — never raises.
     No database interaction.
@@ -218,16 +241,12 @@ def get_phonetic(word: str) -> str:
 
 def get_pronunciation_audio(word: str) -> io.BytesIO:
     """
-    Generate pronunciation audio for a word or paragraph and return
-    it as an in-memory MP3 buffer.
-    No database interaction, no file saved.
+    Generate pronunciation audio via Edge TTS and return as in-memory MP3 buffer.
+    No database interaction, no file saved, no API key needed.
 
     Usage in endpoint:
         audio = get_pronunciation_audio(word)
         return StreamingResponse(audio, media_type="audio/mpeg")
     """
-    tts = gTTS(text=word.strip(), lang="en")
-    mp3_buffer = io.BytesIO()
-    tts.write_to_fp(mp3_buffer)
-    mp3_buffer.seek(0)
-    return mp3_buffer
+    return asyncio.run(_edge_tts_to_buffer(word.strip()))
+

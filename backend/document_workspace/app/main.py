@@ -115,6 +115,9 @@ _scheduler = AsyncIOScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
+    from wordlogic import init_db
+    init_db()
+    logger.info("Dictionary table initialised.")
     _scheduler.add_job(_cleanup_revoked_tokens, "interval", hours=24, id="cleanup_revoked")
     _scheduler.start()
     logger.info("Startup complete — scheduler running.")
@@ -707,8 +710,8 @@ from pydantic import BaseModel
 class WordMeaningResponse(BaseModel):
     word:    str
     meaning: str
-    synonym: str
-    example: str
+    synonym: str = ""
+    example: str = ""
     source:  str
 
 @app.get(

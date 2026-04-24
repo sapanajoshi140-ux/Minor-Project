@@ -36,7 +36,7 @@ def create_token(data: dict, expires: timedelta) -> str:
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 def create_access_token(email: str) -> str:
-    return create_token({"sub": email, "type": "access"}, timedelta(minutes=15))
+    return create_token({"sub": email, "type": "access"}, timedelta(hours=2))
 
 def create_refresh_token(email: str) -> str:
     return create_token({"sub": email, "type": "refresh"}, timedelta(days=7))

@@ -2,7 +2,6 @@ import asyncio
 import os
 import io
 import requests
-import pygame
 import edge_tts
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, Column, String, Text
@@ -174,39 +173,6 @@ async def _edge_tts_to_buffer(text_to_speak: str) -> io.BytesIO:
     return mp3_buffer
 
 
-def _speak(text_to_speak: str) -> None:
-    """
-    Internal helper — generates audio via Edge TTS and plays it with pygame.
-    Works for both single words and full paragraphs.
-    No file saved to disk.
-    """
-    mp3_buffer = asyncio.run(_edge_tts_to_buffer(text_to_speak))
-
-    pygame.mixer.init()
-    pygame.mixer.music.load(mp3_buffer, "mp3")
-    pygame.mixer.music.play()
-
-    while pygame.mixer.music.get_busy():
-        pygame.time.Clock().tick(10)
-
-    pygame.mixer.quit()
-
-
-def pronounce_word(word: str) -> None:
-    """
-    Speak a single word aloud using Edge TTS neural voice.
-    No database interaction whatsoever.
-    """
-    _speak(word.strip())
-
-
-def pronounce_paragraph(text: str) -> None:
-    """
-    Speak a full paragraph or any length of text aloud using Edge TTS.
-    No database interaction whatsoever.
-    """
-    _speak(text.strip())
-
 
 def get_phonetic(word: str) -> str:
     """
@@ -249,4 +215,3 @@ def get_pronunciation_audio(word: str) -> io.BytesIO:
         return StreamingResponse(audio, media_type="audio/mpeg")
     """
     return asyncio.run(_edge_tts_to_buffer(word.strip()))
-

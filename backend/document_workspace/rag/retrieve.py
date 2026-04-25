@@ -26,11 +26,11 @@ from ingest import embed_query
 from vector_db import Chunk, get_store
 
 # ── Config from .env ──────────────────────────────────────────────────────────
-TOP_K      = int(os.getenv("TOP_K"))
-USE_HYBRID = os.getenv("USE_HYBRID").lower() == "true"
-RRF_K      = int(os.getenv("RRF_K"))
-BM25_K1    = float(os.getenv("BM25_K1"))
-BM25_B     = float(os.getenv("BM25_B"))
+TOP_K      = int(os.getenv("TOP_K",    "5"))
+USE_HYBRID = os.getenv("USE_HYBRID", "true").lower() == "true"
+RRF_K      = int(os.getenv("RRF_K",    "60"))
+BM25_K1    = float(os.getenv("BM25_K1",  "1.2"))
+BM25_B     = float(os.getenv("BM25_B",   "0.75"))
 
 K1 = BM25_K1
 B  = BM25_B

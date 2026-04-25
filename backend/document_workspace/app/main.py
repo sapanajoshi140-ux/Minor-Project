@@ -21,15 +21,30 @@ GET    /document/{document_id}/pdf                 — download viewer-ready PDF
 
 GET    /me/storage                                 — current user's storage usage
 GET    /documents                                  — list all documents for the user
+
+POST   /chat                                       — Q&A over indexed documents (full JSON)
+POST   /chat/stream                                — Q&A over indexed documents (SSE streaming)
+POST   /summarize                                  — Summarize arbitrary text (full JSON)
+POST   /summarize/stream                           — Summarize arbitrary text (SSE streaming)
+GET    /session/{session_id}/history               — Retrieve chat history for a session
+DELETE /session/{session_id}                       — Clear chat history for a session
+
+GET    /health                                     — Health check
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re as _re
 import sys
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
+from typing import List, Literal, Optional
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import (
     Depends,
@@ -40,15 +55,25 @@ from fastapi import (
     Response,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer
+from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
+load_dotenv()
+
+# ── Path setup ────────────────────────────────────────────────────────────────
+_APP_DIR = Path(__file__).resolve().parent          # document_workspace/app
+_RAG_DIR = _APP_DIR.parent / "rag"                  # document_workspace/rag
+if str(_RAG_DIR) not in sys.path:
+    sys.path.insert(0, str(_RAG_DIR))
+
+# ── App-local imports (resolved from document_workspace/app) ──────────────────
 from config import setup_logging
-from datetime import datetime
 from database import (
     Document,
     DocumentPage,
@@ -77,18 +102,37 @@ from schemas import (
 )
 from services.pdf_generator_service import generate_searchable_pdf
 
-from contextlib import asynccontextmanager
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+# ── RAG imports (resolved from document_workspace/rag) ────────────────────────
+from generate import (
+    build_context,
+    generate_answer,
+    generate_answer_stream,
+    summarize_text,
+    summarize_text_stream,
+)
+from retrieve import retrieve, TOP_K, USE_HYBRID
 
-load_dotenv()
-
-# ── RAG path setup ────────────────────────────────────────────────────────────
-_APP_DIR = Path(__file__).resolve().parent          # document_workspace/app
-_RAG_DIR = _APP_DIR.parent / "rag"                  # document_workspace/rag
-if str(_RAG_DIR) not in sys.path:
-    sys.path.insert(0, str(_RAG_DIR))
-
+# ── Logging ───────────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
+
+# ── Session store (RAG multi-turn) ────────────────────────────────────────────
+SESSIONS: dict[str, list[dict]] = {}
+
+# ── Config ────────────────────────────────────────────────────────────────────
+FRONTEND_URL  = os.getenv("FRONTEND_URL",  "http://localhost:5173")
+CORS_ORIGINS  = os.getenv("CORS_ORIGINS",  "http://localhost:5173").split(",")
+
+
+# ── Text cleaning (RAG) ───────────────────────────────────────────────────────
+def _clean_text(text: str) -> str:
+    """Strip control characters that break JSON encoding (common in PDF text)."""
+    text = text.replace('\f',   '\n')
+    text = text.replace('\r\n', '\n')
+    text = text.replace('\r',   '\n')
+    text = text.replace('\x00', '')
+    text = _re.sub(r'[\x01-\x08\x0b\x0e-\x1f\x7f]', '', text)
+    return text.strip()
+
 
 # ── Startup / shutdown ────────────────────────────────────────────────────────
 
@@ -110,7 +154,9 @@ def _cleanup_revoked_tokens() -> None:
     finally:
         db.close()
 
+
 _scheduler = AsyncIOScheduler()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -125,8 +171,6 @@ async def lifespan(app: FastAPI):
     _scheduler.shutdown(wait=False)
     logger.info("Shutdown complete.")
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
-CORS_ORIGINS  = os.getenv("CORS_ORIGINS",  "http://localhost:5173").split(",")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -134,19 +178,23 @@ security = HTTPBearer()
 
 app = FastAPI(
     title="Document Workspace API",
+    version="2.0.0",
+    description=(
+        "RAG-powered document workspace: OCR, Q&A, summarization, and more. "
+        "Document ingestion is handled by POST /upload. "
+        "All document routes require JWT authentication."
+    ),
     lifespan=lifespan,
     swagger_ui_parameters={"persistAuthorization": True},
 )
 
 # Custom OpenAPI schema — adds the 🔒 Authorize button to Swagger UI
-from fastapi.openapi.utils import get_openapi
-
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
     schema = get_openapi(
         title="Document Workspace API",
-        version="0.1.0",
+        version="2.0.0",
         routes=app.routes,
     )
     schema.setdefault("components", {})["securitySchemes"] = {
@@ -162,6 +210,7 @@ def custom_openapi():
             operation["security"] = [{"BearerAuth": []}]
     app.openapi_schema = schema
     return schema
+
 
 app.openapi = custom_openapi
 
@@ -201,6 +250,10 @@ def _get_owned_document(
         raise HTTPException(status_code=404, detail="Document not found.")
     return doc
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DOCUMENT ROUTES
+# ═════════════════════════════════════════════════════════════════════════════
 
 # ── Storage usage ─────────────────────────────────────────────────────────────
 
@@ -531,9 +584,9 @@ def delete_document(
 
     db.commit()
 
-    # ── Remove RAG chunks for this document ───────────────────────────────────
+    # Remove RAG chunks for this document
     try:
-        from rag.ingest import delete_document as rag_delete
+        from ingest import delete_document as rag_delete  # document_workspace/rag/ingest.py
         rag_delete(document_id)
         logger.info(f"Document {document_id} — RAG chunks deleted.")
     except Exception as exc:
@@ -688,8 +741,6 @@ def download_pdf(
     pdf_path = Path(doc.generated_pdf_path)
     filename = f"{Path(doc.filename).stem}.pdf"
 
-    # Read file and return with inline Content-Disposition so the
-    # browser renders it inside the iframe instead of downloading it
     with open(pdf_path, "rb") as f:
         content = f.read()
 
@@ -703,9 +754,10 @@ def download_pdf(
         },
     )
 
-# ── Dictionary — Meaning ──────────────────────────────────────────────────────
 
-from pydantic import BaseModel
+# ═════════════════════════════════════════════════════════════════════════════
+# DICTIONARY ROUTES
+# ═════════════════════════════════════════════════════════════════════════════
 
 class WordMeaningResponse(BaseModel):
     word:    str
@@ -713,6 +765,7 @@ class WordMeaningResponse(BaseModel):
     synonym: str = ""
     example: str = ""
     source:  str
+
 
 @app.get(
     "/dictionary/{word}/meaning",
@@ -739,9 +792,6 @@ def word_meaning(
         raise HTTPException(status_code=404, detail=f"No definition found for '{word}'.")
     return WordMeaningResponse(**result)
 
-
-
-# ── Dictionary — Pronunciation ──────────────────────────────────────────────────────────────────────────────
 
 @app.get(
     "/dictionary/{word}/pronounce",
@@ -776,8 +826,6 @@ def word_pronounce(
     phonetic   = get_phonetic(word)
     mp3_buffer = get_pronunciation_audio(word)
 
-    # Phonetic strings contain Unicode (e.g. /həˈloʊ/) which cannot be
-    # encoded as latin-1 headers. URL-encode so it stays ASCII-safe.
     safe_phonetic = quote(phonetic, safe="/ˈˌ") if phonetic else ""
 
     return StreamingResponse(
@@ -788,4 +836,318 @@ def word_pronounce(
             "X-Phonetic":                    safe_phonetic,
             "Access-Control-Expose-Headers": "X-Phonetic",
         },
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RAG — Pydantic models
+# ═════════════════════════════════════════════════════════════════════════════
+
+class ChatRequest(BaseModel):
+    question: str = Field(
+        ...,
+        min_length=1,
+        description="The question to ask against the indexed documents.",
+        examples=["What is the main topic of the document?"],
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Session ID for multi-turn conversation. "
+            "Omit on the first message — the server will generate one and return it. "
+            "Pass the returned session_id in all follow-up messages to maintain history."
+        ),
+        examples=["550e8400-e29b-41d4-a716-446655440000"],
+    )
+    doc_ids: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Restrict retrieval to specific document IDs. "
+            "Omit (or pass null) to search across all indexed documents."
+        ),
+        examples=[["doc-uuid-1", "doc-uuid-2"]],
+    )
+    top_k: int = Field(
+        default=TOP_K,
+        ge=1,
+        le=20,
+        description="Number of document chunks to retrieve and pass to the LLM as context.",
+        examples=[5],
+    )
+    use_hybrid: bool = Field(
+        default=USE_HYBRID,
+        description=(
+            "Enable hybrid retrieval (dense vector search + BM25 keyword search fused via RRF). "
+            "Set to false to use dense-only retrieval."
+        ),
+        examples=[True],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "question":   "What are the key findings of the report?",
+                "session_id": "550e8400-e29b-41d4-a716-446655440000",
+                "doc_ids":    ["your-document-uuid-here"],
+                "top_k":      5,
+                "use_hybrid": True,
+            }
+        }
+    }
+
+
+class ChatResponse(BaseModel):
+    answer: str = Field(description="The LLM-generated answer to the question.")
+    session_id: str = Field(
+        description="Session ID — pass this back in subsequent requests to maintain conversation history."
+    )
+    citations: List[dict] = Field(
+        description=(
+            "List of source chunks used to generate the answer. "
+            "Each entry contains fields returned by generate_answer — "
+            "typically: source_n, doc_id, page, score, text_snippet."
+        )
+    )
+    sources_used: int = Field(
+        description="Total number of chunks retrieved and passed to the LLM."
+    )
+
+
+class SummarizeRequest(BaseModel):
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=50_000,
+        description="The text to summarize. Maximum 50,000 characters.",
+        examples=["Paste the document text or selected passage here..."],
+    )
+    length: Literal["short", "medium", "long", "bullets"] = Field(
+        default="medium",
+        description=(
+            "Controls the output length and style:\n"
+            "- **short** — 2-3 sentences\n"
+            "- **medium** — 1 concise paragraph\n"
+            "- **long** — detailed multi-paragraph summary\n"
+            "- **bullets** — bullet-point list of key points"
+        ),
+        examples=["medium"],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "text":   "The quarterly report shows revenue grew by 12% year-over-year...",
+                "length": "medium",
+            }
+        }
+    }
+
+
+class SummarizeResponse(BaseModel):
+    summary:    str = Field(description="The generated summary.")
+    length:     str = Field(description="The length/style used.")
+    char_count: int = Field(description="Character count of the input text.")
+
+
+class SessionHistoryResponse(BaseModel):
+    session_id: str        = Field(description="The session ID.")
+    history:    List[dict] = Field(description="Ordered list of user/assistant turns.")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RAG — Chat & Summarize routes
+# ═════════════════════════════════════════════════════════════════════════════
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    summary="Ask a question (full JSON response)",
+    description=(
+        "Send a question and get a full JSON response with the answer and citations. "
+        "Use `session_id` to maintain multi-turn conversation history. "
+        "Use `doc_ids` to restrict retrieval to specific documents."
+    ),
+    tags=["RAG"],
+)
+def chat(req: ChatRequest):
+    question = _clean_text(req.question)
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    session_id = req.session_id or str(uuid.uuid4())
+    history    = SESSIONS.setdefault(session_id, [])
+
+    chunks = retrieve(
+        query=question,
+        doc_ids=req.doc_ids,
+        top_k=req.top_k,
+        use_hybrid=req.use_hybrid,
+    )
+    if not chunks:
+        raise HTTPException(
+            status_code=404,
+            detail="No indexed documents found. Please upload a document first.",
+        )
+
+    answer, citations = generate_answer(question, chunks, history)
+    history.append({"role": "user",      "content": question})
+    history.append({"role": "assistant", "content": answer})
+
+    return ChatResponse(
+        answer=answer,
+        session_id=session_id,
+        citations=citations,
+        sources_used=len(chunks),
+    )
+
+
+@app.post(
+    "/chat/stream",
+    summary="Ask a question (SSE streaming)",
+    description=(
+        "Same as POST `/chat` but streams the answer token-by-token via Server-Sent Events (SSE).\n\n"
+        "**SSE event format:**\n"
+        "- First event: `event: meta` — JSON with `session_id` and `citations`\n"
+        "- Subsequent events: `data: <token>` — answer tokens as they are generated\n"
+        "- Final event: `data: [DONE]` — signals end of stream"
+    ),
+    tags=["RAG"],
+)
+def chat_stream(req: ChatRequest):
+    question = _clean_text(req.question)
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    session_id = req.session_id or str(uuid.uuid4())
+    history    = SESSIONS.setdefault(session_id, [])
+
+    chunks = retrieve(
+        query=question,
+        doc_ids=req.doc_ids,
+        top_k=req.top_k,
+        use_hybrid=req.use_hybrid,
+    )
+    if not chunks:
+        raise HTTPException(status_code=404, detail="No indexed documents found.")
+
+    full_answer: list[str] = []
+
+    def event_stream():
+        import json as _json
+        _, citations = build_context(chunks)
+        yield f"event: meta\ndata: {_json.dumps({'session_id': session_id, 'citations': citations})}\n\n"
+
+        for token in generate_answer_stream(question, chunks, history):
+            full_answer.append(token)
+            yield f"data: {token}\n\n"
+
+        history.append({"role": "user",      "content": question})
+        history.append({"role": "assistant", "content": "".join(full_answer)})
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post(
+    "/summarize",
+    response_model=SummarizeResponse,
+    summary="Summarize text (full JSON response)",
+    description=(
+        "Pass any text (e.g. a copied passage from a document) and receive a concise summary. "
+        "Use the `length` field to control output style."
+    ),
+    tags=["RAG"],
+)
+def summarize(req: SummarizeRequest):
+    cleaned = _clean_text(req.text)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+
+    try:
+        summary = summarize_text(cleaned, length=req.length)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Summarization failed: {e}")
+
+    return SummarizeResponse(
+        summary=summary,
+        length=req.length,
+        char_count=len(cleaned),
+    )
+
+
+@app.post(
+    "/summarize/stream",
+    summary="Summarize text (SSE streaming)",
+    description=(
+        "Same as POST `/summarize` but streams the summary token-by-token via SSE.\n\n"
+        "**SSE event format:**\n"
+        "- `data: <token>` — summary tokens as they are generated\n"
+        "- `data: [DONE]` — signals end of stream\n"
+        "- `event: error` — emitted if summarization fails mid-stream"
+    ),
+    tags=["RAG"],
+)
+def summarize_stream(req: SummarizeRequest):
+    cleaned = _clean_text(req.text)
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+
+    def event_stream():
+        try:
+            for token in summarize_text_stream(cleaned, length=req.length):
+                yield f"data: {token}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"event: error\ndata: {e}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ── Session management ────────────────────────────────────────────────────────
+
+@app.get(
+    "/session/{session_id}/history",
+    response_model=SessionHistoryResponse,
+    summary="Get conversation history",
+    description="Retrieve the full ordered chat history for a given session ID.",
+    tags=["RAG"],
+)
+def get_history(session_id: str):
+    return SessionHistoryResponse(
+        session_id=session_id,
+        history=SESSIONS.get(session_id, []),
+    )
+
+
+@app.delete(
+    "/session/{session_id}",
+    summary="Clear conversation history",
+    description="Delete all chat history for the given session. The session ID can be reused afterwards.",
+    tags=["RAG"],
+)
+def clear_session(session_id: str):
+    SESSIONS.pop(session_id, None)
+    return {"status": "cleared", "session_id": session_id}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# HEALTH
+# ═════════════════════════════════════════════════════════════════════════════
+
+class HealthResponse(BaseModel):
+    status:   str = Field(description="Service status — always 'ok' if reachable.")
+    sessions: int = Field(description="Number of active in-memory RAG sessions.")
+
+
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    summary="Health check",
+    description="Returns service status and the number of active in-memory RAG sessions.",
+    tags=["Health"],
+)
+def health():
+    return HealthResponse(
+        status="ok",
+        sessions=len(SESSIONS),
     )

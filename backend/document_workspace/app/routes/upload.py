@@ -59,12 +59,13 @@ async def upload_document(
     """
     Full pipeline:
     1. Validate extension
-    2. Enforce per-user 100 MB storage quota
+    2. Enforce per-user storage quota
     3. Save to disk
     4. Classify: "text" or "scanned"
     5. Extract / OCR all pages (streamed to DB in batches)
-    6. Generate  PDF
-    7. Finalise document record and update user storage counter
+    6. Generate searchable PDF
+    7. Ingest into RAG
+    8. Finalise document record and update user storage counter
     """
 
     # ── 1. Validate filename / extension ──────────────────────────────────────
@@ -102,7 +103,6 @@ async def upload_document(
         raise HTTPException(status_code=500, detail="Failed to save uploaded file.")
 
     # ── 3. Enforce per-user storage quota ─────────────────────────────────────
-    # Re-query inside the transaction so we see the latest committed value.
     db.refresh(current_user)
     if current_user.used_storage_bytes + total_bytes > USER_STORAGE_LIMIT_BYTES:
         file_path.unlink(missing_ok=True)
@@ -193,15 +193,19 @@ async def upload_document(
     # ── 8. Ingest into RAG ────────────────────────────────────────────────────
     try:
         import importlib
-        _rag_ingest = importlib.import_module("ingest")
+        _rag_ingest           = importlib.import_module("ingest")
         ingest_from_db_pages  = _rag_ingest.ingest_from_db_pages
         ingest_from_file_path = _rag_ingest.ingest_from_file_path
 
         if document_category == "text":
-            # Pure text doc — chunk directly from original file
-            rag_result = ingest_from_file_path(doc_id, str(file_path))
+            # Text doc (PDF / TXT / DOCX / PPTX) — load via generated PDF where needed.
+            rag_result = ingest_from_file_path(
+                doc_id,
+                str(file_path),
+                generated_pdf_path=generated_pdf_path,
+            )
         else:
-            # Scanned doc — chunk from OCR text already in all_pages
+            # Scanned doc — chunk from OCR text already in all_pages.
             rag_result = ingest_from_db_pages(doc_id, all_pages)
 
         logger.info(
@@ -209,7 +213,7 @@ async def upload_document(
             f"{rag_result['chunks']} chunks from {rag_result['pages']} page(s)."
         )
     except Exception as exc:
-        # RAG failure must NOT fail the upload — document is already saved
+        # RAG failure must NOT fail the upload — document is already saved.
         logger.error(f"RAG ingestion failed for {doc_id}: {exc}", exc_info=True)
 
     # ── 9. Finalise document record + update quota counter ────────────────────

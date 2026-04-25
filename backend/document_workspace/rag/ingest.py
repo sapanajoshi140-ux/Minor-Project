@@ -2,7 +2,9 @@
 ingest.py
 ---------
 Full ingestion pipeline:
-  1. Load & parse document (PDF / TXT / DOCX)
+  1. Load & parse document (PDF / TXT / DOCX / PPTX)
+     — For DOCX and PPTX the generated searchable PDF is used so we go
+       through a single, consistent PyPDFLoader code path.
   2. Split into overlapping chunks with page tracking
   3. Embed via Ollama
   4. Store in ChromaDB
@@ -19,7 +21,7 @@ import uuid
 import numpy as np
 import requests
 from dotenv import load_dotenv
-from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, TextLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
@@ -29,13 +31,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from vector_db import Chunk, get_doc_store, get_vector_store
 
 # ── Config from .env ──────────────────────────────────────────────────────────
-EMBEDDING_MODEL  = os.getenv("EMBEDDING_MODEL")
-OLLAMA_BASE_URL  = os.getenv("OLLAMA_BASE_URL")
-CHUNK_SIZE       = int(os.getenv("CHUNK_SIZE"))
-CHUNK_OVERLAP    = int(os.getenv("CHUNK_OVERLAP"))
-EMBEDDING_DIM    = int(os.getenv("EMBEDDING_DIM"))
-EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE"))
-EMBED_TIMEOUT    = int(os.getenv("EMBED_TIMEOUT"))
+EMBEDDING_MODEL  = os.getenv("EMBEDDING_MODEL",  "nomic-embed-text")
+OLLAMA_BASE_URL  = os.getenv("OLLAMA_BASE_URL",  "http://localhost:11434")
+CHUNK_SIZE       = int(os.getenv("CHUNK_SIZE",       "400"))
+CHUNK_OVERLAP    = int(os.getenv("CHUNK_OVERLAP",    "80"))
+EMBEDDING_DIM    = int(os.getenv("EMBEDDING_DIM",    "768"))
+EMBED_BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "32"))
+EMBED_TIMEOUT    = int(os.getenv("EMBED_TIMEOUT",    "60"))
 
 
 # ── Embedding ─────────────────────────────────────────────────────────────────
@@ -58,14 +60,41 @@ def embed_query(text: str) -> np.ndarray:
 
 
 # ── Loader ────────────────────────────────────────────────────────────────────
-def _load_file(path: str):
+def _load_file(path: str, generated_pdf_path: str | None = None):
+    """
+    Load a document and return a list of LangChain Documents.
+
+    For DOCX / PPTX the upload pipeline already converts the file to a
+    searchable PDF (generated_pdf_path).  We load that PDF through
+    PyPDFLoader so every file type goes through the same code path and
+    page metadata stays consistent.
+
+    Parameters
+    ----------
+    path               : path to the original uploaded file.
+    generated_pdf_path : path to the generated searchable PDF (required for
+                         DOCX / DOC / PPTX / PPT).
+    """
     ext = os.path.splitext(path)[1].lower()
+
     if ext == ".pdf":
         return PyPDFLoader(path).load()
+
     elif ext == ".txt":
         return TextLoader(path, encoding="utf-8").load()
-    elif ext in (".docx", ".doc"):
-        return Docx2txtLoader(path).load()
+
+    elif ext in (".docx", ".doc", ".pptx", ".ppt"):
+        if not generated_pdf_path or not os.path.exists(generated_pdf_path):
+            raise ValueError(
+                f"Generated PDF not found for {ext} file '{path}'. "
+                "Ensure generate_searchable_pdf ran successfully before ingestion."
+            )
+        return PyPDFLoader(generated_pdf_path).load()
+
+    elif ext in (".png", ".jpg", ".jpeg"):
+        # Images are scanned docs — OCR text is ingested via ingest_from_db_pages.
+        return []
+
     else:
         raise ValueError(f"Unsupported file type: {ext}")
 
@@ -89,9 +118,13 @@ def _split(docs) -> list[dict]:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-def ingest_file(file_path: str, doc_id: str) -> dict:
+def ingest_file(
+    file_path: str,
+    doc_id: str,
+    generated_pdf_path: str | None = None,
+) -> dict:
     store       = get_doc_store()
-    raw_docs    = _load_file(file_path)
+    raw_docs    = _load_file(file_path, generated_pdf_path=generated_pdf_path)
     split_items = _split(raw_docs)
 
     if not split_items:
@@ -154,7 +187,6 @@ def ingest_from_db_pages(doc_id: str, pages: list[dict]) -> dict:
             continue
         page_num = page.get("page_number", 1)
 
-        # Split each page's text independently so page numbers stay accurate
         splits = splitter.split_text(text)
         for i, chunk_text in enumerate(splits):
             if not chunk_text.strip():
@@ -180,14 +212,20 @@ def ingest_from_db_pages(doc_id: str, pages: list[dict]) -> dict:
     }
 
 
-def ingest_from_file_path(doc_id: str, file_path: str) -> dict:
+def ingest_from_file_path(
+    doc_id: str,
+    file_path: str,
+    generated_pdf_path: str | None = None,
+) -> dict:
     """
     Ingest a TEXT document directly from its file on disk.
-    Same as ingest_file() but uses the app's doc_id instead of generating one.
 
     Parameters
     ----------
-    doc_id    : the document UUID from the app.
-    file_path : absolute path to the original uploaded file.
+    doc_id             : the document UUID from the app.
+    file_path          : absolute path to the original uploaded file.
+    generated_pdf_path : path to the generated searchable PDF — required for
+                         DOCX / DOC / PPTX / PPT so we load the converted PDF
+                         instead of the original binary format.
     """
-    return ingest_file(file_path, doc_id)
+    return ingest_file(file_path, doc_id, generated_pdf_path=generated_pdf_path)

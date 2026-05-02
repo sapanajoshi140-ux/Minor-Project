@@ -22,6 +22,19 @@ GET    /document/{document_id}/pdf                 — download viewer-ready PDF
 GET    /me/storage                                 — current user's storage usage
 GET    /documents                                  — list all documents for the user
 
+── Dashboard ──────────────────────────────────────────────────────────────────
+GET    /me/dashboard                               — all dashboard data in one call
+PUT    /me/reading-goal                            — set daily reading goal (minutes)
+POST   /reading-session/start                      — call when user opens a document
+POST   /reading-session/end                        — call when user closes a document
+GET    /me/vocabulary                              — paginated vocabulary list
+GET    /me/vocabulary/search                       — search vocabulary words
+
+── Dictionary ─────────────────────────────────────────────────────────────────
+GET    /dictionary/{word}/meaning                  — meaning, synonym, example
+GET    /dictionary/{word}/pronounce                — MP3 audio + phonetic header
+
+── RAG ────────────────────────────────────────────────────────────────────────
 POST   /chat                                       — Q&A over indexed documents (full JSON)
 POST   /chat/stream                                — Q&A over indexed documents (SSE streaming)
 POST   /summarize                                  — Summarize arbitrary text (full JSON)
@@ -40,9 +53,9 @@ import re as _re
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
@@ -58,34 +71,38 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer
-from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
 load_dotenv()
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-_APP_DIR = Path(__file__).resolve().parent          # document_workspace/app
-_RAG_DIR = _APP_DIR.parent / "rag"                  # document_workspace/rag
+_APP_DIR = Path(__file__).resolve().parent
+_RAG_DIR = _APP_DIR.parent / "rag"
 if str(_RAG_DIR) not in sys.path:
     sys.path.insert(0, str(_RAG_DIR))
 
-# ── App-local imports (resolved from document_workspace/app) ──────────────────
+# ── App-local imports ─────────────────────────────────────────────────────────
 from config import setup_logging
 from database import (
     Document,
     DocumentPage,
+    ReadingSession,
+    ReadingGoal,
     RevokedToken,
     SessionLocal,
     User,
+    UserVocabulary,
     USER_STORAGE_LIMIT_BYTES,
     get_db,
 )
 from dependencies import get_current_user, get_current_user_flexible
 from routes.upload import router as upload_router
 from schemas import (
+    # existing
     DeleteResponse,
     DocumentEditRequest,
     DocumentEditResponse,
@@ -99,10 +116,33 @@ from schemas import (
     PaginatedPagesResponse,
     StorageUsageResponse,
     DocumentListResponse,
+    # dashboard
+    ReadingSessionStartRequest,
+    ReadingSessionStartResponse,
+    ReadingSessionEndRequest,
+    ReadingSessionEndResponse,
+    ReadingGoalRequest,
+    ReadingGoalResponse,
+    DashboardResponse,
+    DashboardStatsResponse,
+    DailyReadingEntry,
+    DocumentTimeEntry,
+    VocabularyEntry,
+    VocabularyListResponse,
+    # dictionary
+    WordMeaningResponse,
+    # rag
+    ChatRequest,
+    ChatResponse,
+    SummarizeRequest,
+    SummarizeResponse,
+    SessionHistoryResponse,
+    # health
+    HealthResponse,
 )
 from services.pdf_generator_service import generate_searchable_pdf
 
-# ── RAG imports (resolved from document_workspace/rag) ────────────────────────
+# ── RAG imports ───────────────────────────────────────────────────────────────
 from generate import (
     build_context,
     generate_answer,
@@ -112,20 +152,23 @@ from generate import (
 )
 from retrieve import retrieve, TOP_K, USE_HYBRID
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
 
-# ── Session store (RAG multi-turn) ────────────────────────────────────────────
 SESSIONS: dict[str, list[dict]] = {}
 
-# ── Config ────────────────────────────────────────────────────────────────────
-FRONTEND_URL  = os.getenv("FRONTEND_URL",  "http://localhost:5173")
-CORS_ORIGINS  = os.getenv("CORS_ORIGINS",  "http://localhost:5173").split(",")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
+# ── Tuneable constants (all env-configurable) ─────────────────────────────────
+DEFAULT_DAILY_GOAL_MIN      = int(os.getenv("DEFAULT_DAILY_GOAL_MIN",   "60"))
+MIN_SESSION_DURATION_SECS   = int(os.getenv("MIN_SESSION_DURATION_SECS", "5"))
+DASHBOARD_CHART_DAYS        = int(os.getenv("DASHBOARD_CHART_DAYS",     "14"))
+DASHBOARD_RECENT_DOCS_LIMIT = int(os.getenv("DASHBOARD_RECENT_DOCS_LIMIT", "5"))
+DASHBOARD_VOCAB_LIMIT       = int(os.getenv("DASHBOARD_VOCAB_LIMIT",    "7"))
 
 
-# ── Text cleaning (RAG) ───────────────────────────────────────────────────────
+# ── Text cleaning ─────────────────────────────────────────────────────────────
 def _clean_text(text: str) -> str:
-    """Strip control characters that break JSON encoding (common in PDF text)."""
     text = text.replace('\f',   '\n')
     text = text.replace('\r\n', '\n')
     text = text.replace('\r',   '\n')
@@ -135,9 +178,7 @@ def _clean_text(text: str) -> str:
 
 
 # ── Startup / shutdown ────────────────────────────────────────────────────────
-
 def _cleanup_revoked_tokens() -> None:
-    """Delete expired blacklist rows — runs daily via APScheduler."""
     db = SessionLocal()
     try:
         deleted = (
@@ -173,7 +214,6 @@ async def lifespan(app: FastAPI):
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
-
 security = HTTPBearer()
 
 app = FastAPI(
@@ -188,7 +228,7 @@ app = FastAPI(
     swagger_ui_parameters={"persistAuthorization": True},
 )
 
-# Custom OpenAPI schema — adds the 🔒 Authorize button to Swagger UI
+
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -230,17 +270,7 @@ app.include_router(upload_router)
 
 
 # ── Ownership guard ───────────────────────────────────────────────────────────
-
-def _get_owned_document(
-    document_id: str,
-    db: Session,
-    current_user: User,
-) -> Document:
-    """
-    Return the Document if it exists AND belongs to current_user.
-    Raises 404 for missing documents and for documents owned by other users
-    (we never reveal that another user's document exists).
-    """
+def _get_owned_document(document_id: str, db: Session, current_user: User) -> Document:
     doc = (
         db.query(Document)
         .filter(Document.id == document_id, Document.user_id == current_user.id)
@@ -249,6 +279,186 @@ def _get_owned_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
     return doc
+
+
+# ── Dashboard helpers ─────────────────────────────────────────────────────────
+
+def _get_daily_goal(user_id: int, db: Session) -> int:
+    """Return user's daily goal in minutes, defaulting to 60."""
+    goal = db.query(ReadingGoal).filter(ReadingGoal.user_id == user_id).first()
+    return goal.daily_goal_min if goal else DEFAULT_DAILY_GOAL_MIN
+
+
+def _compute_streaks(user_id: int, db: Session) -> tuple[int, int]:
+    """
+    Compute (current_streak, best_streak) in days.
+
+    A day counts toward the streak if the user has at least one completed
+    reading session (duration_seconds is not None) on that calendar day.
+    Sessions are grouped by date in the DB's local timezone.
+    """
+    # Pull all distinct dates (UTC) on which the user completed a session.
+    rows = (
+        db.query(func.date(ReadingSession.started_at).label("day"))
+        .filter(
+            ReadingSession.user_id == user_id,
+            ReadingSession.duration_seconds.isnot(None),
+        )
+        .distinct()
+        .order_by(func.date(ReadingSession.started_at).desc())
+        .all()
+    )
+
+    if not rows:
+        return 0, 0
+
+    active_dates = sorted({row.day for row in rows}, reverse=True)
+    today = date.today()
+
+    # ── Current streak ────────────────────────────────────────────────────────
+    current = 0
+    # Allow today OR yesterday as the most recent active day so that a user
+    # who read yesterday but not yet today doesn't lose their streak.
+    expected = today if active_dates[0] == today else today - timedelta(days=1)
+
+    for d in active_dates:
+        if d == expected:
+            current += 1
+            expected -= timedelta(days=1)
+        elif d < expected:
+            break   # gap — streak ends
+
+    # ── Best streak ───────────────────────────────────────────────────────────
+    best    = 0
+    run     = 0
+    prev    = None
+    for d in sorted(active_dates):
+        if prev is None or d == prev + timedelta(days=1):
+            run += 1
+        else:
+            run = 1
+        best = max(best, run)
+        prev = d
+
+    return current, best
+
+
+def _build_daily_chart(user_id: int, db: Session, days: int = 14) -> List[DailyReadingEntry]:
+    """
+    Return one DailyReadingEntry per calendar day for the last `days` days
+    (including today), with minutes read on that day (0 if none).
+    """
+    since = datetime.utcnow().date() - timedelta(days=days - 1)
+
+    rows = (
+        db.query(
+            func.date(ReadingSession.started_at).label("day"),
+            func.sum(ReadingSession.duration_seconds).label("total_secs"),
+        )
+        .filter(
+            ReadingSession.user_id == user_id,
+            ReadingSession.duration_seconds.isnot(None),
+            func.date(ReadingSession.started_at) >= since,
+        )
+        .group_by(func.date(ReadingSession.started_at))
+        .all()
+    )
+
+    day_map: dict[date, float] = {row.day: (row.total_secs or 0) / 60 for row in rows}
+
+    chart: List[DailyReadingEntry] = []
+    for i in range(days):
+        d = since + timedelta(days=i)
+        chart.append(DailyReadingEntry(
+            date=d.strftime("%Y-%m-%d"),
+            minutes=round(day_map.get(d, 0.0), 1),
+        ))
+    return chart
+
+
+def _build_recent_documents(
+    user_id: int, db: Session, limit: int = 5
+) -> List[DocumentTimeEntry]:
+    """
+    Return the most recently uploaded documents for the user,
+    each annotated with total seconds spent reading it.
+    """
+    docs = (
+        db.query(Document)
+        .filter(Document.user_id == user_id)
+        .order_by(Document.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    if not docs:
+        return []
+
+    doc_ids = [d.id for d in docs]
+
+    # Sum of duration_seconds per document for this user.
+    time_rows = (
+        db.query(
+            ReadingSession.document_id,
+            func.sum(ReadingSession.duration_seconds).label("total_secs"),
+        )
+        .filter(
+            ReadingSession.user_id == user_id,
+            ReadingSession.document_id.in_(doc_ids),
+            ReadingSession.duration_seconds.isnot(None),
+        )
+        .group_by(ReadingSession.document_id)
+        .all()
+    )
+    time_map: dict[str, int] = {r.document_id: (r.total_secs or 0) for r in time_rows}
+
+    return [
+        DocumentTimeEntry(
+            id=d.id,
+            filename=d.filename,
+            file_type=d.file_type or "",
+            file_size_bytes=d.file_size_bytes,
+            total_pages=d.total_pages,
+            created_at=d.created_at,
+            time_spent_seconds=time_map.get(d.id, 0),
+        )
+        for d in docs
+    ]
+
+
+def _build_vocabulary_entries(
+    user_id: int, db: Session, limit: int = 7
+) -> List[VocabularyEntry]:
+    """
+    Return the most recently looked-up vocabulary words for the user,
+    enriched with meanings from the dictionary table.
+    """
+    from wordlogic import get_meaning
+
+    rows = (
+        db.query(UserVocabulary)
+        .filter(UserVocabulary.user_id == user_id)
+        .order_by(UserVocabulary.looked_up_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    entries: List[VocabularyEntry] = []
+    for row in rows:
+        meaning_data = get_meaning(row.word)
+        doc_name = None
+        if row.document_id and row.document:
+            doc_name = row.document.filename
+
+        entries.append(VocabularyEntry(
+            word=row.word,
+            meaning=meaning_data.get("meaning", ""),
+            synonym=meaning_data.get("synonym"),
+            document_name=doc_name,
+            document_id=row.document_id,
+            looked_up_at=row.looked_up_at,
+        ))
+    return entries
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -262,7 +472,6 @@ def get_storage_usage(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return the authenticated user's current storage usage and quota."""
     db.refresh(current_user)
     used  = current_user.used_storage_bytes or 0
     limit = USER_STORAGE_LIMIT_BYTES
@@ -283,22 +492,22 @@ def list_documents(
     request: Request,
     page: int = 1,
     limit: int = 20,
+    q: Optional[str] = Query(default=None, description="Search by filename (partial match)."),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List all documents belonging to the authenticated user (paginated)."""
     if limit > 100:
         limit = 100
     offset = (page - 1) * limit
 
-    total = (
-        db.query(Document)
-        .filter(Document.user_id == current_user.id)
-        .count()
-    )
-    docs = (
-        db.query(Document)
-        .filter(Document.user_id == current_user.id)
+    base_filter = db.query(Document).filter(Document.user_id == current_user.id)
+
+    if q and q.strip():
+        base_filter = base_filter.filter(Document.filename.like(f"%{q.strip()}%"))
+
+    total = base_filter.count()
+    docs  = (
+        base_filter
         .order_by(Document.created_at.desc())
         .offset(offset)
         .limit(limit)
@@ -418,7 +627,6 @@ def stream_lines(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Stream OCR lines for a single page as NDJSON."""
     import json
 
     doc = _get_owned_document(document_id, db, current_user)
@@ -584,9 +792,8 @@ def delete_document(
 
     db.commit()
 
-    # Remove RAG chunks for this document
     try:
-        from ingest import delete_document as rag_delete  # document_workspace/rag/ingest.py
+        from ingest import delete_document as rag_delete
         rag_delete(document_id)
         logger.info(f"Document {document_id} — RAG chunks deleted.")
     except Exception as exc:
@@ -748,7 +955,7 @@ def download_pdf(
         content=content,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f"inline; filename=\"{filename}\"",
+            "Content-Disposition": f'inline; filename="{filename}"',
             "Content-Length": str(len(content)),
             "Cache-Control": "private, max-age=3600",
         },
@@ -756,15 +963,384 @@ def download_pdf(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# DICTIONARY ROUTES
+# DASHBOARD ROUTES
 # ═════════════════════════════════════════════════════════════════════════════
 
-class WordMeaningResponse(BaseModel):
-    word:    str
-    meaning: str
-    synonym: str = ""
-    example: str = ""
-    source:  str
+# ── Full dashboard (single call) ──────────────────────────────────────────────
+
+@app.get(
+    "/me/dashboard",
+    response_model=DashboardResponse,
+    tags=["Dashboard"],
+    summary="Get all dashboard data in one request",
+    description=(
+        "Returns the four stat cards, the 14-day reading chart, the 5 most recent "
+        "documents with time-spent, and the 7 most recently looked-up vocabulary words. "
+        "This is the primary endpoint for the dashboard page — one call, everything."
+    ),
+)
+@limiter.limit("30/minute")
+def get_dashboard(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    uid = current_user.id
+
+    # ── All-time total seconds ─────────────────────────────────────────────
+    total_secs_row = (
+        db.query(func.sum(ReadingSession.duration_seconds))
+        .filter(
+            ReadingSession.user_id == uid,
+            ReadingSession.duration_seconds.isnot(None),
+        )
+        .scalar()
+    )
+    total_secs = total_secs_row or 0
+
+    # ── Today's seconds ───────────────────────────────────────────────────
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_secs_row = (
+        db.query(func.sum(ReadingSession.duration_seconds))
+        .filter(
+            ReadingSession.user_id == uid,
+            ReadingSession.duration_seconds.isnot(None),
+            ReadingSession.started_at >= today_start,
+        )
+        .scalar()
+    )
+    today_secs = today_secs_row or 0
+
+    # ── Documents read (with at least 1 session) ──────────────────────────
+    docs_read = (
+        db.query(func.count(func.distinct(ReadingSession.document_id)))
+        .filter(
+            ReadingSession.user_id == uid,
+            ReadingSession.duration_seconds.isnot(None),
+        )
+        .scalar()
+    ) or 0
+
+    # ── Total docs uploaded ───────────────────────────────────────────────
+    total_docs = (
+        db.query(func.count(Document.id))
+        .filter(Document.user_id == uid)
+        .scalar()
+    ) or 0
+
+    # ── Streak ────────────────────────────────────────────────────────────
+    current_streak, best_streak = _compute_streaks(uid, db)
+
+    # ── Daily goal ────────────────────────────────────────────────────────
+    daily_goal = _get_daily_goal(uid, db)
+
+    stats = DashboardStatsResponse(
+        total_time_read_minutes=round(total_secs / 60, 1),
+        today_read_minutes=round(today_secs / 60, 1),
+        daily_goal_minutes=daily_goal,
+        documents_read=docs_read,
+        total_documents_uploaded=total_docs,
+        current_streak_days=current_streak,
+        best_streak_days=best_streak,
+    )
+
+    return DashboardResponse(
+        stats=stats,
+        daily_chart=_build_daily_chart(uid, db, days=DASHBOARD_CHART_DAYS),
+        recent_documents=_build_recent_documents(uid, db, limit=DASHBOARD_RECENT_DOCS_LIMIT),
+        vocabulary=_build_vocabulary_entries(uid, db, limit=DASHBOARD_VOCAB_LIMIT),
+    )
+
+
+# ── Reading goal ──────────────────────────────────────────────────────────────
+
+@app.put(
+    "/me/reading-goal",
+    response_model=ReadingGoalResponse,
+    tags=["Dashboard"],
+    summary="Set your daily reading goal",
+    description="Set or update your daily reading goal in minutes. Default is 60 minutes.",
+)
+@limiter.limit("10/minute")
+def set_reading_goal(
+    request: Request,
+    data: ReadingGoalRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    goal = db.query(ReadingGoal).filter(ReadingGoal.user_id == current_user.id).first()
+
+    if goal:
+        goal.daily_goal_min = data.daily_goal_min
+    else:
+        goal = ReadingGoal(user_id=current_user.id, daily_goal_min=data.daily_goal_min)
+        db.add(goal)
+
+    db.commit()
+
+    return ReadingGoalResponse(
+        user_id=current_user.id,
+        daily_goal_min=data.daily_goal_min,
+        message=f"Daily reading goal set to {data.daily_goal_min} minutes.",
+    )
+
+
+# ── Reading session — start ───────────────────────────────────────────────────
+
+@app.post(
+    "/reading-session/start",
+    response_model=ReadingSessionStartResponse,
+    tags=["Dashboard"],
+    summary="Start a reading session",
+    description=(
+        "Call this when the user opens a document to read. "
+        "Returns a session_id that must be passed to POST /reading-session/end "
+        "when the user finishes reading."
+    ),
+)
+@limiter.limit("30/minute")
+def start_reading_session(
+    request: Request,
+    data: ReadingSessionStartRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Verify the document exists and belongs to this user.
+    _get_owned_document(data.document_id, db, current_user)
+
+    session = ReadingSession(
+        user_id=current_user.id,
+        document_id=data.document_id,
+        started_at=datetime.utcnow(),
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    logger.info(
+        f"Reading session {session.id} started — "
+        f"user={current_user.email}, doc={data.document_id}"
+    )
+
+    return ReadingSessionStartResponse(
+        session_id=session.id,
+        document_id=data.document_id,
+        started_at=session.started_at,
+        message="Reading session started.",
+    )
+
+
+# ── Reading session — end ─────────────────────────────────────────────────────
+
+@app.post(
+    "/reading-session/end",
+    response_model=ReadingSessionEndResponse,
+    tags=["Dashboard"],
+    summary="End a reading session",
+    description=(
+        "Call this when the user closes or navigates away from a document. "
+        "Computes and stores the duration. "
+        "Sessions shorter than 5 seconds are silently discarded to filter accidental opens."
+    ),
+)
+@limiter.limit("30/minute")
+def end_reading_session(
+    request: Request,
+    data: ReadingSessionEndRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    MIN_DURATION_SECONDS = MIN_SESSION_DURATION_SECS
+
+    session = (
+        db.query(ReadingSession)
+        .filter(
+            ReadingSession.id == data.session_id,
+            ReadingSession.user_id == current_user.id,   # ownership check
+        )
+        .first()
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail="Reading session not found or does not belong to you.",
+        )
+
+    if session.ended_at is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Reading session has already been ended.",
+        )
+
+    ended_at         = datetime.utcnow()
+    duration_seconds = int((ended_at - session.started_at).total_seconds())
+
+    if duration_seconds < MIN_DURATION_SECONDS:
+        # Discard the session — don't pollute stats with accidental opens.
+        db.delete(session)
+        db.commit()
+        logger.debug(
+            f"Reading session {data.session_id} discarded "
+            f"(duration {duration_seconds}s < {MIN_DURATION_SECONDS}s minimum)."
+        )
+        return ReadingSessionEndResponse(
+            session_id=data.session_id,
+            document_id=session.document_id,
+            duration_seconds=0,
+            duration_minutes=0.0,
+            message="Session too short — discarded.",
+        )
+
+    session.ended_at         = ended_at
+    session.duration_seconds = duration_seconds
+    db.commit()
+
+    logger.info(
+        f"Reading session {session.id} ended — "
+        f"user={current_user.email}, duration={duration_seconds}s"
+    )
+
+    return ReadingSessionEndResponse(
+        session_id=session.id,
+        document_id=session.document_id,
+        duration_seconds=duration_seconds,
+        duration_minutes=round(duration_seconds / 60, 2),
+        message="Reading session recorded.",
+    )
+
+
+# ── Vocabulary — paginated list ───────────────────────────────────────────────
+
+@app.get(
+    "/me/vocabulary",
+    response_model=VocabularyListResponse,
+    tags=["Dashboard"],
+    summary="List your vocabulary words",
+    description="Returns all words you have looked up, most recent first, paginated.",
+)
+@limiter.limit("30/minute")
+def list_vocabulary(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from wordlogic import get_meaning
+
+    offset = (page - 1) * limit
+
+    total = (
+        db.query(func.count(UserVocabulary.id))
+        .filter(UserVocabulary.user_id == current_user.id)
+        .scalar()
+    ) or 0
+
+    rows = (
+        db.query(UserVocabulary)
+        .filter(UserVocabulary.user_id == current_user.id)
+        .order_by(UserVocabulary.looked_up_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    entries: List[VocabularyEntry] = []
+    for row in rows:
+        meaning_data = get_meaning(row.word)
+        doc_name = None
+        if row.document_id and row.document:
+            doc_name = row.document.filename
+
+        entries.append(VocabularyEntry(
+            word=row.word,
+            meaning=meaning_data.get("meaning", ""),
+            synonym=meaning_data.get("synonym"),
+            document_name=doc_name,
+            document_id=row.document_id,
+            looked_up_at=row.looked_up_at,
+        ))
+
+    return VocabularyListResponse(
+        total=total,
+        page=page,
+        limit=limit,
+        words=entries,
+    )
+
+
+# ── Vocabulary — search ───────────────────────────────────────────────────────
+
+@app.get(
+    "/me/vocabulary/search",
+    response_model=VocabularyListResponse,
+    tags=["Dashboard"],
+    summary="Search your vocabulary words",
+    description="Search through your looked-up words by partial word match.",
+)
+@limiter.limit("30/minute")
+def search_vocabulary(
+    request: Request,
+    q: str = Query(..., min_length=1, description="Search term (partial word match)."),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from wordlogic import get_meaning
+
+    offset  = (page - 1) * limit
+    pattern = f"%{q.lower()}%"
+
+    total = (
+        db.query(func.count(UserVocabulary.id))
+        .filter(
+            UserVocabulary.user_id == current_user.id,
+            UserVocabulary.word.like(pattern),
+        )
+        .scalar()
+    ) or 0
+
+    rows = (
+        db.query(UserVocabulary)
+        .filter(
+            UserVocabulary.user_id == current_user.id,
+            UserVocabulary.word.like(pattern),
+        )
+        .order_by(UserVocabulary.looked_up_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    entries: List[VocabularyEntry] = []
+    for row in rows:
+        meaning_data = get_meaning(row.word)
+        doc_name = None
+        if row.document_id and row.document:
+            doc_name = row.document.filename
+
+        entries.append(VocabularyEntry(
+            word=row.word,
+            meaning=meaning_data.get("meaning", ""),
+            synonym=meaning_data.get("synonym"),
+            document_name=doc_name,
+            document_id=row.document_id,
+            looked_up_at=row.looked_up_at,
+        ))
+
+    return VocabularyListResponse(
+        total=total,
+        page=page,
+        limit=limit,
+        words=entries,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DICTIONARY ROUTES
+# ═════════════════════════════════════════════════════════════════════════════
 
 
 @app.get(
@@ -777,19 +1353,36 @@ class WordMeaningResponse(BaseModel):
 def word_meaning(
     request: Request,
     word: str,
+    document_id: Optional[str] = Query(
+        default=None,
+        description="ID of the document the user is currently reading (used to link vocabulary).",
+    ),
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """
-    Look up a word:
-    - Checks the local MySQL dictionary table first (fast indexed lookup).
-    - Falls back to the free dictionary API if not cached, then saves it.
-    - Returns meaning, synonym, and example if available.
-    - No audio — pronunciation is handled by the frontend (Web Speech API).
+    Look up a word and automatically log it to the user's vocabulary.
+
+    Pass `document_id` as a query param when the user looks up a word
+    while reading a specific document — this links the word to that doc
+    in the vocabulary panel.
+
+    Example: GET /dictionary/ephemeral/meaning?document_id=<uuid>
     """
-    from wordlogic import get_meaning
+    from wordlogic import get_meaning, log_vocabulary_lookup
+
     result = get_meaning(word)
     if result["source"] == "Error":
         raise HTTPException(status_code=404, detail=f"No definition found for '{word}'.")
+
+    # Log the lookup — links the word to the user and optionally to a document.
+    log_vocabulary_lookup(
+        user_id=current_user.id,
+        word=word,
+        document_id=document_id,
+        db_session=db,
+    )
+
     return WordMeaningResponse(**result)
 
 
@@ -804,22 +1397,6 @@ def word_pronounce(
     word: str,
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Returns MP3 audio stream + phonetic text for the given word.
-    - No database interaction whatsoever.
-    - Audio is streamed back as audio/mpeg.
-    - Phonetic text (e.g. /prə-nʌnsɪeɪʃən/) is returned in the
-      `X-Phonetic` response header.
-
-    Frontend usage:
-        const res = await fetch(`/dictionary/${word}/pronounce`, {
-            headers: { Authorization: `Bearer ${token}` }
-        });
-        const phonetic = res.headers.get("X-Phonetic"); // e.g. /nɛbjʊlə/
-        const blob = await res.blob();
-        const audio = new Audio(URL.createObjectURL(blob));
-        audio.play();
-    """
     from urllib.parse import quote
     from wordlogic import get_phonetic, get_pronunciation_audio
 
@@ -840,135 +1417,10 @@ def word_pronounce(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# RAG — Pydantic models
-# ═════════════════════════════════════════════════════════════════════════════
-
-class ChatRequest(BaseModel):
-    question: str = Field(
-        ...,
-        min_length=1,
-        description="The question to ask against the indexed documents.",
-        examples=["What is the main topic of the document?"],
-    )
-    session_id: Optional[str] = Field(
-        default=None,
-        description=(
-            "Session ID for multi-turn conversation. "
-            "Omit on the first message — the server will generate one and return it. "
-            "Pass the returned session_id in all follow-up messages to maintain history."
-        ),
-        examples=["550e8400-e29b-41d4-a716-446655440000"],
-    )
-    doc_ids: Optional[List[str]] = Field(
-        default=None,
-        description=(
-            "Restrict retrieval to specific document IDs. "
-            "Omit (or pass null) to search across all indexed documents."
-        ),
-        examples=[["doc-uuid-1", "doc-uuid-2"]],
-    )
-    top_k: int = Field(
-        default=TOP_K,
-        ge=1,
-        le=20,
-        description="Number of document chunks to retrieve and pass to the LLM as context.",
-        examples=[5],
-    )
-    use_hybrid: bool = Field(
-        default=USE_HYBRID,
-        description=(
-            "Enable hybrid retrieval (dense vector search + BM25 keyword search fused via RRF). "
-            "Set to false to use dense-only retrieval."
-        ),
-        examples=[True],
-    )
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "question":   "What are the key findings of the report?",
-                "session_id": "550e8400-e29b-41d4-a716-446655440000",
-                "doc_ids":    ["your-document-uuid-here"],
-                "top_k":      5,
-                "use_hybrid": True,
-            }
-        }
-    }
-
-
-class ChatResponse(BaseModel):
-    answer: str = Field(description="The LLM-generated answer to the question.")
-    session_id: str = Field(
-        description="Session ID — pass this back in subsequent requests to maintain conversation history."
-    )
-    citations: List[dict] = Field(
-        description=(
-            "List of source chunks used to generate the answer. "
-            "Each entry contains fields returned by generate_answer — "
-            "typically: source_n, doc_id, page, score, text_snippet."
-        )
-    )
-    sources_used: int = Field(
-        description="Total number of chunks retrieved and passed to the LLM."
-    )
-
-
-class SummarizeRequest(BaseModel):
-    text: str = Field(
-        ...,
-        min_length=1,
-        max_length=50_000,
-        description="The text to summarize. Maximum 50,000 characters.",
-        examples=["Paste the document text or selected passage here..."],
-    )
-    length: Literal["short", "medium", "long", "bullets"] = Field(
-        default="medium",
-        description=(
-            "Controls the output length and style:\n"
-            "- **short** — 2-3 sentences\n"
-            "- **medium** — 1 concise paragraph\n"
-            "- **long** — detailed multi-paragraph summary\n"
-            "- **bullets** — bullet-point list of key points"
-        ),
-        examples=["medium"],
-    )
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "text":   "The quarterly report shows revenue grew by 12% year-over-year...",
-                "length": "medium",
-            }
-        }
-    }
-
-
-class SummarizeResponse(BaseModel):
-    summary:    str = Field(description="The generated summary.")
-    length:     str = Field(description="The length/style used.")
-    char_count: int = Field(description="Character count of the input text.")
-
-
-class SessionHistoryResponse(BaseModel):
-    session_id: str        = Field(description="The session ID.")
-    history:    List[dict] = Field(description="Ordered list of user/assistant turns.")
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # RAG — Chat & Summarize routes
 # ═════════════════════════════════════════════════════════════════════════════
 
-@app.post(
-    "/chat",
-    response_model=ChatResponse,
-    summary="Ask a question (full JSON response)",
-    description=(
-        "Send a question and get a full JSON response with the answer and citations. "
-        "Use `session_id` to maintain multi-turn conversation history. "
-        "Use `doc_ids` to restrict retrieval to specific documents."
-    ),
-    tags=["RAG"],
-)
+@app.post("/chat", response_model=ChatResponse, tags=["RAG"])
 def chat(req: ChatRequest):
     question = _clean_text(req.question)
     if not question:
@@ -977,42 +1429,18 @@ def chat(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
     history    = SESSIONS.setdefault(session_id, [])
 
-    chunks = retrieve(
-        query=question,
-        doc_ids=req.doc_ids,
-        top_k=req.top_k,
-        use_hybrid=req.use_hybrid,
-    )
+    chunks = retrieve(query=question, doc_ids=req.doc_ids, top_k=req.top_k, use_hybrid=req.use_hybrid)
     if not chunks:
-        raise HTTPException(
-            status_code=404,
-            detail="No indexed documents found. Please upload a document first.",
-        )
+        raise HTTPException(status_code=404, detail="No indexed documents found. Please upload a document first.")
 
     answer, citations = generate_answer(question, chunks, history)
     history.append({"role": "user",      "content": question})
     history.append({"role": "assistant", "content": answer})
 
-    return ChatResponse(
-        answer=answer,
-        session_id=session_id,
-        citations=citations,
-        sources_used=len(chunks),
-    )
+    return ChatResponse(answer=answer, session_id=session_id, citations=citations, sources_used=len(chunks))
 
 
-@app.post(
-    "/chat/stream",
-    summary="Ask a question (SSE streaming)",
-    description=(
-        "Same as POST `/chat` but streams the answer token-by-token via Server-Sent Events (SSE).\n\n"
-        "**SSE event format:**\n"
-        "- First event: `event: meta` — JSON with `session_id` and `citations`\n"
-        "- Subsequent events: `data: <token>` — answer tokens as they are generated\n"
-        "- Final event: `data: [DONE]` — signals end of stream"
-    ),
-    tags=["RAG"],
-)
+@app.post("/chat/stream", tags=["RAG"])
 def chat_stream(req: ChatRequest):
     question = _clean_text(req.question)
     if not question:
@@ -1021,12 +1449,7 @@ def chat_stream(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
     history    = SESSIONS.setdefault(session_id, [])
 
-    chunks = retrieve(
-        query=question,
-        doc_ids=req.doc_ids,
-        top_k=req.top_k,
-        use_hybrid=req.use_hybrid,
-    )
+    chunks = retrieve(query=question, doc_ids=req.doc_ids, top_k=req.top_k, use_hybrid=req.use_hybrid)
     if not chunks:
         raise HTTPException(status_code=404, detail="No indexed documents found.")
 
@@ -1048,16 +1471,7 @@ def chat_stream(req: ChatRequest):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post(
-    "/summarize",
-    response_model=SummarizeResponse,
-    summary="Summarize text (full JSON response)",
-    description=(
-        "Pass any text (e.g. a copied passage from a document) and receive a concise summary. "
-        "Use the `length` field to control output style."
-    ),
-    tags=["RAG"],
-)
+@app.post("/summarize", response_model=SummarizeResponse, tags=["RAG"])
 def summarize(req: SummarizeRequest):
     cleaned = _clean_text(req.text)
     if not cleaned:
@@ -1068,25 +1482,10 @@ def summarize(req: SummarizeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Summarization failed: {e}")
 
-    return SummarizeResponse(
-        summary=summary,
-        length=req.length,
-        char_count=len(cleaned),
-    )
+    return SummarizeResponse(summary=summary, length=req.length, char_count=len(cleaned))
 
 
-@app.post(
-    "/summarize/stream",
-    summary="Summarize text (SSE streaming)",
-    description=(
-        "Same as POST `/summarize` but streams the summary token-by-token via SSE.\n\n"
-        "**SSE event format:**\n"
-        "- `data: <token>` — summary tokens as they are generated\n"
-        "- `data: [DONE]` — signals end of stream\n"
-        "- `event: error` — emitted if summarization fails mid-stream"
-    ),
-    tags=["RAG"],
-)
+@app.post("/summarize/stream", tags=["RAG"])
 def summarize_stream(req: SummarizeRequest):
     cleaned = _clean_text(req.text)
     if not cleaned:
@@ -1103,28 +1502,12 @@ def summarize_stream(req: SummarizeRequest):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-# ── Session management ────────────────────────────────────────────────────────
-
-@app.get(
-    "/session/{session_id}/history",
-    response_model=SessionHistoryResponse,
-    summary="Get conversation history",
-    description="Retrieve the full ordered chat history for a given session ID.",
-    tags=["RAG"],
-)
+@app.get("/session/{session_id}/history", response_model=SessionHistoryResponse, tags=["RAG"])
 def get_history(session_id: str):
-    return SessionHistoryResponse(
-        session_id=session_id,
-        history=SESSIONS.get(session_id, []),
-    )
+    return SessionHistoryResponse(session_id=session_id, history=SESSIONS.get(session_id, []))
 
 
-@app.delete(
-    "/session/{session_id}",
-    summary="Clear conversation history",
-    description="Delete all chat history for the given session. The session ID can be reused afterwards.",
-    tags=["RAG"],
-)
+@app.delete("/session/{session_id}", tags=["RAG"])
 def clear_session(session_id: str):
     SESSIONS.pop(session_id, None)
     return {"status": "cleared", "session_id": session_id}
@@ -1134,20 +1517,6 @@ def clear_session(session_id: str):
 # HEALTH
 # ═════════════════════════════════════════════════════════════════════════════
 
-class HealthResponse(BaseModel):
-    status:   str = Field(description="Service status — always 'ok' if reachable.")
-    sessions: int = Field(description="Number of active in-memory RAG sessions.")
-
-
-@app.get(
-    "/health",
-    response_model=HealthResponse,
-    summary="Health check",
-    description="Returns service status and the number of active in-memory RAG sessions.",
-    tags=["Health"],
-)
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
 def health():
-    return HealthResponse(
-        status="ok",
-        sessions=len(SESSIONS),
-    )
+    return HealthResponse(status="ok", sessions=len(SESSIONS))

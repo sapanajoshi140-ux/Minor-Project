@@ -148,21 +148,72 @@ def get_meaning(word: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# VOCABULARY LOGGING  (dashboard — Your Vocabulary panel)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def log_vocabulary_lookup(
+    user_id: int,
+    word: str,
+    document_id: str | None = None,
+    db_session=None,
+) -> None:
+    """
+    Record that `user_id` looked up `word`, optionally while reading
+    `document_id`.  Inserts a row into `user_vocabulary`.
+
+    Called from the /dictionary/{word}/meaning endpoint in main.py.
+    A new lookup row is always inserted — repeated lookups of the same word
+    are intentional (they reflect genuine learning activity).
+
+    Parameters
+    ----------
+    user_id     : authenticated user's integer ID.
+    word        : lowercase word that was looked up.
+    document_id : UUID of the document the user was reading (may be None).
+    db_session  : an open SQLAlchemy Session from FastAPI's Depends(get_db).
+                  If None, a fresh session is opened and closed internally.
+
+    Never raises — logging failures must not break the dictionary endpoint.
+    """
+    from datetime import datetime
+
+    try:
+        # Import here to avoid circular imports at module load time.
+        from database import UserVocabulary
+
+        def _insert(session):
+            session.add(UserVocabulary(
+                user_id     = user_id,
+                word        = word.lower().strip(),
+                document_id = document_id or None,
+                looked_up_at = datetime.utcnow(),
+            ))
+            session.commit()
+
+        if db_session is not None:
+            _insert(db_session)
+        else:
+            with Session(engine) as session:
+                _insert(session)
+
+    except Exception as exc:
+        # Swallow silently — vocabulary logging is non-critical.
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Vocabulary log failed for user={user_id} word='{word}': {exc}"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PRONUNCIATION FUNCTIONS  (Edge TTS — neural voices, free, no API key)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Change voice here if you want a different one:
-#   en-US-JennyNeural      — natural female (US)
-#   en-US-GuyNeural        — natural male   (US)
-#   en-GB-SoniaNeural      — natural female (British)
-#   en-GB-RyanNeural       — natural male   (British)
 TTS_VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
 
 
 async def _edge_tts_to_buffer(text_to_speak: str) -> io.BytesIO:
     """
     Async helper — generates audio via Edge TTS and returns an in-memory MP3 buffer.
-    No file saved to disk, no API key needed.
     """
     communicate = edge_tts.Communicate(text_to_speak.strip(), voice=TTS_VOICE)
     mp3_buffer  = io.BytesIO()
@@ -173,13 +224,10 @@ async def _edge_tts_to_buffer(text_to_speak: str) -> io.BytesIO:
     return mp3_buffer
 
 
-
 def get_phonetic(word: str) -> str:
     """
-    Fetch the phonetic text (e.g. /həˈloʊ/) for a word
-    from the free dictionary API.
+    Fetch the phonetic text (e.g. /həˈloʊ/) for a word from the free dictionary API.
     Returns an empty string if not available — never raises.
-    No database interaction.
     """
     url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word.lower().strip()}"
     try:
@@ -189,12 +237,10 @@ def get_phonetic(word: str) -> str:
 
         entry = response.json()[0]
 
-        # Top-level phonetic field (most common)
         phonetic = entry.get("phonetic", "")
         if phonetic:
             return phonetic
 
-        # Fallback: first phonetic object with text
         for p in entry.get("phonetics", []):
             if p.get("text"):
                 return p["text"]
@@ -208,10 +254,5 @@ def get_phonetic(word: str) -> str:
 def get_pronunciation_audio(word: str) -> io.BytesIO:
     """
     Generate pronunciation audio via Edge TTS and return as in-memory MP3 buffer.
-    No database interaction, no file saved, no API key needed.
-
-    Usage in endpoint:
-        audio = get_pronunciation_audio(word)
-        return StreamingResponse(audio, media_type="audio/mpeg")
     """
     return asyncio.run(_edge_tts_to_buffer(word.strip()))

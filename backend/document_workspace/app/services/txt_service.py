@@ -15,12 +15,9 @@ Output dict keys use DB-aligned names:
 from __future__ import annotations
 
 import logging
-import os
 from typing import List
 
-from dotenv import load_dotenv
-
-load_dotenv()
+from config import TXT_PAGE_CHAR_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +43,7 @@ def process_txt_file(file_path: str) -> List[dict]:
                 "confidence_score": 1.0,
             }]
 
-        char_limit  = int(os.getenv("TXT_PAGE_CHAR_LIMIT", "3000"))
+        char_limit  = TXT_PAGE_CHAR_LIMIT
         pages_data  : List[dict] = []
         current     : List[str]  = []
         current_len = 0

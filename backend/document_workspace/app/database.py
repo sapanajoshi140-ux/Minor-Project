@@ -1,29 +1,20 @@
 """
 database.py — SQLAlchemy models and DB session factory.
 
-Schema changes (dashboard update)
-----------------------------------
-New tables:
-  - `reading_sessions`  : tracks when a user opens/closes a document and
-                          for how long.  Powers total time, daily chart,
-                          streak, and per-document time-spent.
-  - `reading_goals`     : stores each user's daily reading goal in minutes.
-                          One row per user (upsert pattern).
-  - `user_vocabulary`   : records every dictionary lookup a user makes,
-                          which document they were reading, and when.
-                          Powers the "Your Vocabulary" panel.
+Schema changes (notes update)
+------------------------------
+New table:
+  - `page_notes` : stores one note per (user, document, page_number).
+                   Created/updated via PUT /documents/{id}/pages/{n}/note.
+                   Fetched in bulk via GET /documents/{id}/notes.
 
-Existing tables (unchanged):
-  - `users`             : added `used_storage_bytes` in previous revision.
-  - `documents`         : one row per uploaded file.
-  - `document_pages`    : one row per OCR page (scanned docs only).
-  - `revoked_tokens`    : JWT blacklist shared with Login_signup service.
+Previous tables (unchanged):
+  - `reading_sessions`, `reading_goals`, `user_vocabulary`,
+    `users`, `documents`, `document_pages`, `revoked_tokens`
 """
 
-import os
 from datetime import datetime
 
-from dotenv import load_dotenv
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -34,24 +25,13 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
     create_engine,
 )
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-load_dotenv()
-
-# ── Storage quota ─────────────────────────────────────────────────────────────
-USER_STORAGE_LIMIT_BYTES = int(
-    os.getenv("USER_STORAGE_LIMIT_BYTES", "524288000")   # 500 MB default
-)
-
-# ── Connection ────────────────────────────────────────────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError(
-        "DATABASE_URL not found in environment variables. Check your .env file."
-    )
+from config import DATABASE_URL, USER_STORAGE_LIMIT_BYTES
 
 engine       = create_engine(DATABASE_URL, pool_pre_ping=True, echo=False)
 SessionLocal = sessionmaker(bind=engine)
@@ -61,10 +41,6 @@ Base         = declarative_base()
 # ── User table ────────────────────────────────────────────────────────────────
 
 class User(Base):
-    """
-    Shared users table.  The document_workspace service reads this table to
-    authenticate requests and enforce per-user storage quotas.
-    """
     __tablename__ = "users"
 
     id                 = Column(Integer,     primary_key=True)
@@ -80,12 +56,12 @@ class User(Base):
     reading_sessions  = relationship("ReadingSession",  back_populates="user",        cascade="all, delete-orphan")
     reading_goal      = relationship("ReadingGoal",     back_populates="user",        uselist=False, cascade="all, delete-orphan")
     vocabulary        = relationship("UserVocabulary",  back_populates="user",        cascade="all, delete-orphan")
+    page_notes        = relationship("PageNote",        back_populates="user",        cascade="all, delete-orphan")
 
 
 # ── RevokedToken table ────────────────────────────────────────────────────────
 
 class RevokedToken(Base):
-    """JWT blacklist — shared with the Login_signup service."""
     __tablename__ = "revoked_tokens"
 
     id         = Column(Integer,    primary_key=True, autoincrement=True)
@@ -98,7 +74,6 @@ class RevokedToken(Base):
 # ── Document table ────────────────────────────────────────────────────────────
 
 class Document(Base):
-    """One row per uploaded document — ALL types (text and scanned)."""
     __tablename__ = "documents"
 
     id                 = Column(String(36),  primary_key=True)
@@ -119,12 +94,12 @@ class Document(Base):
     pages            = relationship("DocumentPage",  back_populates="document", cascade="all, delete-orphan", order_by="DocumentPage.page_number")
     reading_sessions = relationship("ReadingSession", back_populates="document", cascade="all, delete-orphan")
     vocabulary_refs  = relationship("UserVocabulary", back_populates="document")
+    page_notes       = relationship("PageNote",       back_populates="document", cascade="all, delete-orphan")
 
 
 # ── DocumentPage table ────────────────────────────────────────────────────────
 
 class DocumentPage(Base):
-    """One row per page — SCANNED DOCUMENTS ONLY."""
     __tablename__ = "document_pages"
 
     id               = Column(Integer,    primary_key=True, autoincrement=True)
@@ -142,25 +117,14 @@ class DocumentPage(Base):
 # ── ReadingSession table ──────────────────────────────────────────────────────
 
 class ReadingSession(Base):
-    """
-    One row per reading session — created when a user opens a document,
-    closed (duration_seconds filled) when they leave.
-
-    Powers:
-      - Total time read (all-time)
-      - Today's reading progress vs daily goal
-      - Daily reading chart (last 14 days)
-      - Per-document time-spent shown in Recent Documents list
-      - Reading streak (consecutive days with ≥ 1 completed session)
-    """
     __tablename__ = "reading_sessions"
 
     id               = Column(Integer,    primary_key=True, autoincrement=True)
     user_id          = Column(Integer,    ForeignKey("users.id",     ondelete="CASCADE"), nullable=False)
     document_id      = Column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     started_at       = Column(DateTime,   nullable=False, default=datetime.utcnow)
-    ended_at         = Column(DateTime,   nullable=True)           # NULL = session still open
-    duration_seconds = Column(Integer,    nullable=True)           # filled on end
+    ended_at         = Column(DateTime,   nullable=True)
+    duration_seconds = Column(Integer,    nullable=True)
 
     user     = relationship("User",     back_populates="reading_sessions")
     document = relationship("Document", back_populates="reading_sessions")
@@ -174,10 +138,6 @@ class ReadingSession(Base):
 # ── ReadingGoal table ─────────────────────────────────────────────────────────
 
 class ReadingGoal(Base):
-    """
-    One row per user — stores their daily reading goal in minutes.
-    Default: 60 minutes.  Updated via PUT /me/reading-goal.
-    """
     __tablename__ = "reading_goals"
 
     user_id        = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
@@ -190,13 +150,6 @@ class ReadingGoal(Base):
 # ── UserVocabulary table ──────────────────────────────────────────────────────
 
 class UserVocabulary(Base):
-    """
-    One row per word lookup per user.  Linked to the document the user was
-    reading when they looked up the word (nullable — can be looked up
-    outside a document context).
-
-    Powers the "Your Vocabulary" panel on the dashboard.
-    """
     __tablename__ = "user_vocabulary"
 
     id           = Column(Integer,    primary_key=True, autoincrement=True)
@@ -211,6 +164,38 @@ class UserVocabulary(Base):
     __table_args__ = (
         Index("idx_uv_user_word",    "user_id", "word"),
         Index("idx_uv_user_looked",  "user_id", "looked_up_at"),
+    )
+
+
+# ── PageNote table ────────────────────────────────────────────────────────────
+
+class PageNote(Base):
+    """
+    One row per (user, document, page_number).
+    Uses an upsert pattern — each user gets exactly one note slot per page.
+
+    Powers:
+      - The per-page note textarea rendered below each page in the viewer.
+      - Notes are fetched in bulk when the document is opened and pre-populated
+        into the correct textarea for each page.
+    """
+    __tablename__ = "page_notes"
+
+    id          = Column(Integer,    primary_key=True, autoincrement=True)
+    user_id     = Column(Integer,    ForeignKey("users.id",     ondelete="CASCADE"), nullable=False)
+    document_id = Column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    page_number = Column(Integer,    nullable=False)
+    note_text   = Column(LONGTEXT,   nullable=False, default="")
+    created_at  = Column(DateTime,   default=datetime.utcnow)
+    updated_at  = Column(DateTime,   default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user     = relationship("User",     back_populates="page_notes")
+    document = relationship("Document", back_populates="page_notes")
+
+    __table_args__ = (
+        # One note per (user × document × page) — the upsert target key.
+        UniqueConstraint("user_id", "document_id", "page_number", name="uq_page_note"),
+        Index("idx_pn_user_doc", "user_id", "document_id"),
     )
 
 

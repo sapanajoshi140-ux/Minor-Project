@@ -29,23 +29,15 @@ OCR_HANDWRITTEN_FALLBACK_THRESHOLD — confidence floor; default 0.60.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import List
 
 import pytesseract
 from PIL import Image
-from dotenv import load_dotenv
 
-load_dotenv()
+from config import TESSERACT_CMD, OCR_CONFIDENCE_THRESHOLD, OCR_HANDWRITTEN_FALLBACK_THRESHOLD
 
 logger = logging.getLogger(__name__)
-
-TESSERACT_CMD                      = os.getenv("TESSERACT_CMD", "tesseract").strip().strip('"\'')
-OCR_CONFIDENCE_THRESHOLD           = float(os.getenv("OCR_CONFIDENCE_THRESHOLD", "0.80"))
-OCR_HANDWRITTEN_FALLBACK_THRESHOLD = float(
-    os.getenv("OCR_HANDWRITTEN_FALLBACK_THRESHOLD", "0.60")
-)
 
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 logger.info(f"Tesseract path                : {TESSERACT_CMD}")

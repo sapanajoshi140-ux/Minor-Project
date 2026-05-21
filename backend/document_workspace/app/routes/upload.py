@@ -16,7 +16,6 @@ Auth & quota
 """
 
 import logging
-import os
 import sys
 import uuid
 from pathlib import Path
@@ -24,7 +23,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
-from config import UPLOAD_DIR, MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB
+from config import UPLOAD_DIR, MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB, PAGE_COMMIT_BATCH_SIZE
 from database import Document, DocumentPage, User, USER_STORAGE_LIMIT_BYTES, get_db
 from schemas import UploadResponse
 from services.parser_service import FileType, detect_file_type, stream_document
@@ -34,8 +33,6 @@ from dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Upload"])
-
-PAGE_COMMIT_BATCH_SIZE = int(os.getenv("PAGE_COMMIT_BATCH_SIZE", "10"))
 
 # ── RAG path setup ────────────────────────────────────────────────────────────
 _APP_DIR = Path(__file__).resolve().parent.parent   # document_workspace/app

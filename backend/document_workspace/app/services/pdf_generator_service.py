@@ -24,20 +24,17 @@ Returns the absolute path string.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from dotenv import load_dotenv
-
-load_dotenv()
+from config import GENERATED_PDF_DIR as _GENERATED_PDF_DIR, LIBREOFFICE_PATH
 
 logger = logging.getLogger(__name__)
 
-GENERATED_PDF_DIR = Path(os.getenv("GENERATED_PDF_DIR", "generated_pdfs"))
+GENERATED_PDF_DIR = Path(_GENERATED_PDF_DIR)
 GENERATED_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── ReportLab geometry (A4) — used only for TXT and scanned ──────────────────
@@ -122,7 +119,7 @@ def _libreoffice_convert(source_path: str, out_path: Path) -> None:
     2. shutil.which("libreoffice") / shutil.which("soffice") — Linux / Mac.
     """
     lo_bin = (
-        os.getenv("LIBREOFFICE_PATH")
+        LIBREOFFICE_PATH
         or shutil.which("libreoffice")
         or shutil.which("soffice")
     )

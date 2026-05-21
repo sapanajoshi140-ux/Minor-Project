@@ -1,7 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// SharedUI.jsx  —  tiny presentational components used in both Workspace and
-//                  PdfViewer so nothing is copy-pasted twice.
-// ─────────────────────────────────────────────────────────────────────────────
+
 import React from 'react';
 
 // ── Spinner ───────────────────────────────────────────────────────────────────

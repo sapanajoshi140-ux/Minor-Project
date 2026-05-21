@@ -1,4 +1,3 @@
-
 import { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -15,22 +14,16 @@ const Feature = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const { isAuthenticated, loading } = useAuth();
-  
-  //  Ref to track if we've already processed URL params
   const processedParams = useRef(false);
 
-  // Redirect authenticated users to dashboard immediately
   useEffect(() => {
     if (!loading && isAuthenticated) {
       navigate('/dashboard', { replace: true });
     }
   }, [isAuthenticated, loading, navigate]);
 
-  //  Handle URL parameters (for email verification, password reset redirect, etc.)
   useEffect(() => {
     if (loading) return;
-    
-    // Only process URL params once to avoid re-opening modals
     if (processedParams.current) return;
     
     const shouldShowLogin = searchParams.get('showLogin') === 'true';
@@ -39,24 +32,15 @@ const Feature = () => {
     
     if (shouldShowLogin || shouldShowSignup || shouldShowForgotPassword) {
       processedParams.current = true;
+      if (shouldShowLogin) setShowLogin(true);
+      else if (shouldShowSignup) setShowSignup(true);
+      else if (shouldShowForgotPassword) setShowForgotPassword(true);
       
-      if (shouldShowLogin) {
-        setShowLogin(true);
-      } else if (shouldShowSignup) {
-        setShowSignup(true);
-      } else if (shouldShowForgotPassword) {
-        setShowForgotPassword(true);
-      }
-      
-      // Clean up URL immediately after opening modal
       const params = new URLSearchParams(searchParams);
       params.delete('showLogin');
       params.delete('showSignup');
       params.delete('showForgotPassword');
-      // Keep 'verified' param temporarily for LoginModal to read
-      if (!shouldShowLogin) {
-        params.delete('verified');
-      }
+      if (!shouldShowLogin) params.delete('verified');
       setSearchParams(params, { replace: true });
     }
   }, [searchParams, setSearchParams, loading]);
@@ -64,44 +48,30 @@ const Feature = () => {
   const features = [
     {
       title: "Upload Documents",
-      desc: "Upload the documents and read in clean and distraction-free environment",
+      desc: "Upload documents and read in a clean, distraction-free environment designed for focus.",
       img: "upload.png",
-      bgColor: "bg-[#F2F2F2]",
-      button: "Upload",
-      action: "signup",
-      reverse: true,
+      reverse: false,
     },
     {
-      title: "Reading Mode Interface",
-      desc: "Tap or click on the word to view meaning and pronunciation or select sentence for text to speech feature",
+      title: "Reading Mode",
+      desc: "Tap any word for instant definitions and pronunciation. Select sentences for text-to-speech.",
       img: "word.png",
-      button: "Try Now",
-      action: "signup",
-      bgColor: "bg-[#F2F2F2]",
+      reverse: true,
     },
     {
       title: "AI Assistant",
-      desc: "Query AI about any topics in your document and summarise your content for quick revision",
+      desc: "Query AI about any topic in your document and generate summaries for quick revision.",
       img: "summarize.png",
-      bgColor: "bg-[#F2F2F2]",
-      button: "Ask AI",
-      action: "signup",
-      reverse: true,
+      reverse: false,
     },
   ];
 
-  const handleFeatureClick = (action) => {
-    if (action === 'signup') {
-      setShowSignup(true);
-    } else if (action === 'login') {
-      setShowLogin(true);
-    }
+  const handleFeatureClick = () => {
+    setShowSignup(true);
   };
 
-  // Simplified modal close handlers - just close the modal
   const handleCloseLogin = () => {
     setShowLogin(false);
-    // Clean up any remaining URL params
     const params = new URLSearchParams(searchParams);
     params.delete('verified');
     if (params.toString() !== searchParams.toString()) {
@@ -109,97 +79,159 @@ const Feature = () => {
     }
   };
 
-  const handleCloseSignup = () => {
-    setShowSignup(false);
-  };
-
-  const handleCloseForgotPassword = () => {
-    setShowForgotPassword(false);
-  };
-
+  // ─── YOUR ORIGINAL ANIMATION VARIANTS ───
   const featureVariants = {
     hidden: { opacity: 0, y: 50 },
     visible: { 
       opacity: 1, 
       y: 0, 
-      transition: { duration: 1.3 } 
+      transition: { duration: 1.3 }
     },
   };
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-[#F1EADA]">
+      <div className="flex items-center justify-center min-h-screen bg-[#2D241F]">
         <div className="text-center">
-          <div className="w-16 h-16 border-4 border-gray-900/20 border-t-gray-900 rounded-full animate-spin mx-auto"></div>
-          <p className="text-gray-900 mt-4 font-medium">Loading...</p>
+          <div className="w-16 h-16 border-4 border-[rgba(201,168,76,0.2)] border-t-[#C9A84C] rounded-full animate-spin mx-auto"></div>
+          <p className="mt-4 font-['Inter'] text-sm font-medium text-[#8A8279]">Loading...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <section className="bg-[#F1EADA] w-full py-24 min-h-screen">
-      <div className="max-w-6xl mx-auto px-6">
+    <section 
+      id="features"
+      className="w-full py-24 relative overflow-hidden bg-[#20201f]"
+    >
+      {/* Subtle warm ambient glow */}
+      <div 
+        className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] opacity-[0.06] pointer-events-none"
+        style={{
+          background: 'radial-gradient(ellipse, #C9A84C 0%, transparent 70%)',
+        }}
+      />
 
-        <div className="max-w-4xl mx-auto px-6">
-          {/* Hero Section */}
-          <div className="text-center mb-20">
-            <h1 className="text-5xl md:text-6xl font-bold font-serif text-black mb-4 leading-tight tracking-tight">
-              Elevate Your Learning With ReadWithEase
-            </h1>
-            <p className="text-xl md:text-2xl text-black/80 mb-8">
-              "ReadWithEase helps you access tools that simplify your reading and find deeper insights."
-            </p>
-            
-            {/* CTA Buttons */}
-            
-               
-          </div>
+      <div className="max-w-5xl mx-auto px-6 relative z-10">
 
-          {/* Features */}
-          <div className="space-y-24">
-            {features.map((f, i) => (
-              <motion.div
-                key={i}
-                className={`flex flex-col md:flex-row items-center gap-12 ${
-                  f.reverse ? "md:flex-row-reverse" : ""
-                }`}
-                initial="hidden"
-                whileInView="visible"
+        {/* ─── HERO HEADER WITH YOUR ORIGINAL DELAYS ─── */}
+        <motion.div 
+          className="text-center mb-20"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 1, duration: 0.8 }}
+        >
+          <h2 className="font-['Inter'] text-[clamp(2rem,4vw,3rem)] font-semibold leading-tight mb-4 tracking-[-0.02em] text-[#F5F0E8]">
+            Elevate Your Learning 
+          </h2>
+          
+          <p className="font-['Inter'] text-base font-normal text-[#A8A29E] max-w-xl mx-auto leading-relaxed">
+            "ReadWithEase helps you access tools that simplify your reading and find deeper insights."
+          </p>
+        </motion.div>
+
+        
+        <div className="space-y-24">
+          {features.map((f, i) => (
+            <motion.div
+              key={i}
+              className={`flex flex-col md:flex-row items-center gap-10 ${
+                f.reverse ? "md:flex-row-reverse" : ""
+              }`}
+              initial="hidden"
+              whileInView="visible"
+              viewport={{ once: false, amount: 0.3 }}
+              variants={featureVariants}
+            >
+              {/* Image Card */}
+              <motion.div 
+                className="w-full md:w-[45%] relative group"
+                initial={{ opacity: 0, scale: 0.9 }}
+                whileInView={{ opacity: 1, scale: 1 }}
                 viewport={{ once: false, amount: 0.3 }}
-                variants={featureVariants}
+                transition={{ delay: 0.6, duration: 0.8 }}
               >
-                <div className={`w-full md:w-1/2 aspect-[4/5] ${f.bgColor} rounded-[40px] shadow-lg flex items-center justify-center overflow-hidden transition-transform hover:scale-105 duration-300`}>
-                  <img src={f.img} alt={f.title} />
-                </div>
-
-                <div className="w-full md:w-1/2 text-center md:text-left px-2">
-                  <h3 className="text-4xl font-semibold text-black mb-3">{f.title}</h3>
-                  <p className="text-xl max-w-lg text-black leading-relaxed font-medium mb-6">
-                    {f.desc}
-                  </p>
-                  <button 
-                    onClick={() => handleFeatureClick(f.action)}
-                    className="bg-gray-900 text-white px-10 py-4 rounded-full text-lg font-bold hover:scale-105 transition-all shadow-xl active:scale-95 inline-flex items-center gap-2"
-                  >
-                    {f.button}
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                    </svg>
-                  </button>
+                <div 
+                  className="aspect-[16/10] rounded-2xl overflow-hidden relative flex items-center justify-center"
+                  style={{
+                    background: 'rgba(35, 32, 29, 0.6)',
+                    border: '0.5px solid rgba(201, 168, 76, 0.15)',
+                    boxShadow: '0 8px 32px rgba(0,0,0,0.2), inset 0 0.5px 0 rgba(201,168,76,0.06)',
+                  }}
+                >
+                  <img 
+                    src={f.img} 
+                    alt={f.title} 
+                    className="w-full h-full object-cover opacity-85 group-hover:opacity-100 transition-all duration-700 group-hover:scale-105"
+                  />
                 </div>
               </motion.div>
-            ))}
-          </div>
 
-          {/* Footer CTA */}
-         
+              {/* Text Content */}
+              <div className="w-full md:w-[55%] text-center md:text-left px-2">
+                <span className="font-['Inter'] text-[11px] font-medium tracking-[0.15em] uppercase mb-3 block text-[#C9A84C]">
+                  Feature {String(i + 1).padStart(2, '0')}
+                </span>
+                
+                <h3 className="font-['Inter'] text-[clamp(1.4rem,2.2vw,1.9rem)] font-semibold mb-3 tracking-[-0.01em] leading-tight text-[#F5F0E8]">
+                  {f.title}
+                </h3>
+                
+                <p className="font-['Inter'] text-[15px] leading-relaxed font-normal mb-8 max-w-md text-[#A8A29E]">
+                  {f.desc}
+                </p>
+                
+                {/* ─── BUTTON WITH YOUR ORIGINAL ANIMATION ─── */}
+                <motion.button 
+                  onClick={handleFeatureClick}
+                  className="font-['Inter'] text-[13px] font-medium tracking-[0.02em] rounded-full px-8 py-3 cursor-pointer transition-all duration-200 inline-flex items-center gap-2 text-[#F5F0E8] bg-transparent border border-[rgba(201,168,76,0.2)] hover:border-[#C9A84C] hover:bg-[rgba(201,168,76,0.06)]"
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ delay: 0.6, duration: 0.8 }}
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  Get Started
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
+                </motion.button>
+              </div>
+            </motion.div>
+          ))}
         </div>
+
+        {/* ─── BOTTOM CTA WITH YOUR ORIGINAL DELAY ─── */}
+        <motion.div 
+          className="text-center mt-20 pt-16"
+          style={{ borderTop: '0.5px solid rgba(201, 168, 76, 0.1)' }}
+          initial={{ opacity: 0, y: 30 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true }}
+          transition={{ delay: 1.2, duration: 0.8 }}
+        >
+          <h3 className="font-['Inter'] text-xl font-semibold mb-3 text-[#F5F0E8] tracking-[-0.01em]">
+            Ready to <span className="text-[#C9A84C]">Begin</span>?
+          </h3>
+          
+          <p className="font-['Inter'] text-sm text-[#A8A29E] mb-6">
+            Join and transform your learning experience.
+          </p>
+          
+          <motion.button
+            onClick={handleFeatureClick}
+            className="font-['Inter'] text-[13px] font-semibold tracking-[0.02em] rounded-full px-8 py-3 cursor-pointer transition-all duration-200 text-[#2A2724] bg-[#C9A84C] hover:bg-[#E8C96A]"
+            style={{ boxShadow: '0 4px 20px rgba(201,168,76,0.15)' }}
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+          >
+            Start Reading Now
+          </motion.button>
+        </motion.div>
       </div>
 
-      {/* ALL THREE MODALS */}
-      
-      {/* Login Modal */}
+      {/* Modals */}
       <LoginModal 
         isOpen={showLogin}
         onClose={handleCloseLogin}
@@ -212,23 +244,19 @@ const Feature = () => {
           setShowForgotPassword(true);
         }}
       />
-
-      {/* Signup Modal */}
       <SignupModal 
         isOpen={showSignup}
-        onClose={handleCloseSignup}
+        onClose={() => setShowSignup(false)}
         onSwitchToLogin={() => {
-          handleCloseSignup();
+          setShowSignup(false);
           setShowLogin(true);
         }}
       />
-
-      {/* Forgot Password Modal */}
       <ForgotPasswordModal 
         isOpen={showForgotPassword}
-        onClose={handleCloseForgotPassword}
+        onClose={() => setShowForgotPassword(false)}
         onSwitchToLogin={() => {
-          handleCloseForgotPassword();
+          setShowForgotPassword(false);
           setShowLogin(true);
         }}
       />

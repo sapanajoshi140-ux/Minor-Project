@@ -3,16 +3,10 @@
 /* ── Base ── */
 body {
   font-family: sans-serif;
-  background: rgb(239, 246, 255);
+  background: rgb(26, 26, 26);
 }
 
-/* ── PDF.js text layer ── */
-/*
-  The div uses className="pdf-text-layer" in PdfViewer.jsx.
-  Spans are positioned absolutely by PDF.js to sit exactly over the canvas text.
-  We make them transparent so the canvas rendering shows through,
-  but the DOM text is still selectable and searchable.
-*/
+
 .pdf-text-layer {
   position: absolute;
   top: 0;
@@ -47,4 +41,9 @@ body {
 
 .react-pdf__Page__canvas {
   pointer-events: none;
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }

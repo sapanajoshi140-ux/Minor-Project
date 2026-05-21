@@ -3,7 +3,7 @@ const Modal = ({ isOpen, onClose, children, title, hideCloseButton = false }) =>
 
   return (
     <div 
-      className={`fixed inset-0 z-50 flex items-center justify-center ${
+      className={`fixed inset-0 z-1100 flex items-center justify-center ${
         hideCloseButton ? '' : 'bg-black/50 backdrop-blur-md'
       }`}
       onClick={hideCloseButton ? undefined : onClose}

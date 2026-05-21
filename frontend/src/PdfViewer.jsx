@@ -1,26 +1,33 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// PdfViewer.jsx  —  refactored; shared code lives in ../shared/
+// PdfViewer.jsx  (full — centered note button in footer, panel below)
 // ─────────────────────────────────────────────────────────────────────────────
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { loadScript, loadLink, getToken }                  from './Docutils';
 import { Spinner, PageSkeleton, EndOfDocument }            from './Sharedui';
 import { useIntersectionVisible }                          from './Hooks';
+import { CenteredNoteButton, FloatingNotePanel }           from './NoteSection';
 
 const PDFJS_VERSION = '3.4.120';
 const PDFJS_CDN     = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}`;
 
 // ── Single rendered page ──────────────────────────────────────────────────────
-const PdfPage = ({ pdf, pageNum, onVisible }) => {
+const PdfPage = ({
+  pdf,
+  pageNum,
+  onVisible,
+  noteContent,
+  onNoteChange,
+  isNoteOpen,
+  onToggleNote,
+}) => {
   const canvasRef     = useRef(null);
   const textLayerRef  = useRef(null);
   const renderTaskRef = useRef(null);
   const [rendered,  setRendered]  = useState(false);
   const [rendering, setRendering] = useState(false);
 
-  // Fire onVisible whenever this page enters the viewport
   const wrapperRef = useIntersectionVisible(pageNum, onVisible);
 
-  // Lazy-render on first intersection
   const hasRendered = useRef(false);
   useEffect(() => {
     if (!wrapperRef.current) return;
@@ -96,46 +103,74 @@ const PdfPage = ({ pdf, pageNum, onVisible }) => {
   useEffect(() => () => { renderTaskRef.current?.cancel(); }, []);
 
   return (
-    <div
-      ref={wrapperRef}
-      data-page={pageNum}
-      className="relative group mx-auto transition-transform duration-300"
-      style={{ width: 'fit-content' }}
-    >
-      {/* Page-number label on hover */}
-      <div className="absolute -left-10 top-0 text-xs text-gray-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity select-none">
-        p.{pageNum}
-      </div>
-
-      {/* A4 card */}
+    <div className="flex flex-col items-center space-y-0">
       <div
-        className="bg-white shadow-sm hover:shadow-md transition-shadow duration-300 border border-gray-200/60 relative overflow-hidden"
-        style={{ minHeight: rendered ? undefined : '297mm', minWidth: '210mm' }}
+        ref={wrapperRef}
+        data-page={pageNum}
+        className="relative group mx-auto transition-transform duration-300"
+        style={{ width: 'fit-content' }}
       >
-        {!rendered && <PageSkeleton />}
+        {/* Page-number label on hover */}
+        <div className="absolute -left-10 top-0 text-xs text-gray-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity select-none">
+          p.{pageNum}
+        </div>
 
-        <canvas
-          ref={canvasRef}
-          className={`block max-w-full transition-opacity duration-200 ${rendering ? 'opacity-50' : 'opacity-100'}`}
-        />
-
+        {/* A4 card */}
         <div
-          ref={textLayerRef}
-          className="absolute top-0 left-0 overflow-hidden select-text pointer-events-auto"
-        />
+          className="bg-white shadow-sm hover:shadow-md transition-shadow duration-300 border border-gray-200/60 relative"
+          style={{ minHeight: rendered ? undefined : '297mm', minWidth: '210mm', overflow: 'visible' }}
+        >
+          {!rendered && <PageSkeleton />}
 
-        {rendering && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <Spinner size="w-7 h-7" color="border-t-gray-400" />
+          <canvas
+            ref={canvasRef}
+            className={`block max-w-full transition-opacity duration-200 ${rendering ? 'opacity-50' : 'opacity-100'}`}
+          />
+
+          <div
+            ref={textLayerRef}
+            className="absolute top-0 left-0 overflow-hidden select-text pointer-events-auto"
+          />
+
+          {rendering && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <Spinner size="w-7 h-7" color="border-t-gray-400" />
+            </div>
+          )}
+
+          {/* ── CENTERED PAGE FOOTER with Note button ── */}
+          <div className="border-t border-gray-100 flex items-center justify-center px-4 py-2.5 bg-white">
+            <CenteredNoteButton
+              hasNote={!!noteContent}
+              isOpen={isNoteOpen}
+              onClick={() => onToggleNote(pageNum)}
+              pageNum={pageNum}
+            />
           </div>
-        )}
+        </div>
       </div>
+
+      {/* ── FLOATING NOTE PANEL (appears below page) ── */}
+      <FloatingNotePanel
+        pageNum={pageNum}
+        note={noteContent || ''}
+        onChange={(val) => onNoteChange(pageNum, val)}
+        isOpen={isNoteOpen}
+        onClose={() => onToggleNote(pageNum)}
+      />
     </div>
   );
 };
 
 // ── Main PdfViewer ────────────────────────────────────────────────────────────
-const PdfViewer = ({ pdfUrl }) => {
+const PdfViewer = ({
+  pdfUrl,
+  onPageChange,
+  pageNotes,
+  onNoteChange,
+  openNotePageNum,
+  onToggleNote,
+}) => {
   const [ready,       setReady]       = useState(false);
   const [error,       setError]       = useState(null);
   const [totalPages,  setTotalPages]  = useState(0);
@@ -143,7 +178,6 @@ const PdfViewer = ({ pdfUrl }) => {
   const pdfDocRef = useRef(null);
   const scrollRef = useRef(null);
 
-  // Load PDF.js once
   useEffect(() => {
     loadLink(`${PDFJS_CDN}/pdf_viewer.min.css`);
     loadScript(`${PDFJS_CDN}/pdf.min.js`)
@@ -154,7 +188,6 @@ const PdfViewer = ({ pdfUrl }) => {
       .catch(() => setError('Failed to load PDF.js'));
   }, []);
 
-  // Load document
   useEffect(() => {
     if (!ready || !pdfUrl) return;
 
@@ -180,12 +213,20 @@ const PdfViewer = ({ pdfUrl }) => {
         setError('Failed to load PDF. Please try again.');
       });
 
-    return () => { if (pdfDocRef.current) { pdfDocRef.current.destroy(); pdfDocRef.current = null; } };
+    return () => {
+      if (pdfDocRef.current) {
+        pdfDocRef.current.destroy();
+        pdfDocRef.current = null;
+      }
+    };
   }, [ready, pdfUrl]);
 
   useEffect(() => () => { pdfDocRef.current?.destroy(); }, []);
 
-  const handlePageVisible = useCallback((pageNum) => setCurrentPage(pageNum), []);
+  const handlePageVisible = useCallback((pageNum) => {
+    setCurrentPage(pageNum);
+    onPageChange?.(pageNum);
+  }, [onPageChange]);
 
   const scrollToPage = (pageNum) => {
     const p  = Math.max(1, Math.min(pageNum, totalPages));
@@ -209,7 +250,16 @@ const PdfViewer = ({ pdfUrl }) => {
       <div ref={scrollRef} className="flex-1 overflow-y-auto pb-20 scroll-smooth" style={{ maxHeight: '100vh' }}>
         <div className="flex flex-col items-center space-y-8 pt-8 px-12">
           {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
-            <PdfPage key={pageNum} pdf={pdfDocRef.current} pageNum={pageNum} onVisible={handlePageVisible} />
+            <PdfPage
+              key={pageNum}
+              pdf={pdfDocRef.current}
+              pageNum={pageNum}
+              onVisible={handlePageVisible}
+              noteContent={pageNotes?.[pageNum] || ''}
+              onNoteChange={onNoteChange}
+              isNoteOpen={openNotePageNum === pageNum}
+              onToggleNote={onToggleNote}
+            />
           ))}
           <EndOfDocument />
         </div>
@@ -217,14 +267,12 @@ const PdfViewer = ({ pdfUrl }) => {
 
       {/* Right overlay: page tracker */}
       <div className="absolute top-4 right-4 z-10 flex flex-col items-end gap-2 pointer-events-none">
-        {/* Page pill */}
         <div className="bg-white/90 backdrop-blur-sm border border-gray-200 shadow-sm px-4 py-1.5 rounded-full pointer-events-auto select-none">
           <span className="text-xs font-medium text-gray-600">
             Page {currentPage} of {totalPages}
           </span>
         </div>
 
-        {/* Prev / next */}
         <div className="bg-white/90 backdrop-blur-sm border border-gray-200 shadow-sm px-2 py-1.5 rounded-full pointer-events-auto flex items-center gap-1 select-none">
           {[
             { label: '‹', title: 'Previous page', delta: -1, disabled: currentPage <= 1 },
@@ -242,7 +290,6 @@ const PdfViewer = ({ pdfUrl }) => {
           ))}
         </div>
 
-        {/* Dot nav for small documents */}
         {totalPages <= 20 && (
           <div className="flex flex-col items-center gap-1.5 pointer-events-auto">
             {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (

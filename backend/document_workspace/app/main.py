@@ -30,6 +30,11 @@ POST   /reading-session/end                        — call when user closes a d
 GET    /me/vocabulary                              — paginated vocabulary list
 GET    /me/vocabulary/search                       — search vocabulary words
 
+── Notes ──────────────────────────────────────────────────────────────────────
+GET    /documents/{document_id}/notes              — fetch all page notes for a document
+PUT    /documents/{document_id}/pages/{n}/note     — create or update a page note
+DELETE /documents/{document_id}/pages/{n}/note     — delete a page note
+
 ── Dictionary ─────────────────────────────────────────────────────────────────
 GET    /dictionary/{word}/meaning                  — meaning, synonym, example
 GET    /dictionary/{word}/pronounce                — MP3 audio + phonetic header
@@ -58,7 +63,6 @@ from pathlib import Path
 from typing import List, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
 from fastapi import (
     Depends,
     FastAPI,
@@ -77,8 +81,6 @@ from slowapi.util import get_remote_address
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
-load_dotenv()
-
 # ── Path setup ────────────────────────────────────────────────────────────────
 _APP_DIR = Path(__file__).resolve().parent
 _RAG_DIR = _APP_DIR.parent / "rag"
@@ -86,10 +88,20 @@ if str(_RAG_DIR) not in sys.path:
     sys.path.insert(0, str(_RAG_DIR))
 
 # ── App-local imports ─────────────────────────────────────────────────────────
-from config import setup_logging
+from config import (
+    setup_logging,
+    FRONTEND_URL,
+    CORS_ORIGINS,
+    DEFAULT_DAILY_GOAL_MIN,
+    MIN_SESSION_DURATION_SECS,
+    DASHBOARD_CHART_DAYS,
+    DASHBOARD_RECENT_DOCS_LIMIT,
+    DASHBOARD_VOCAB_LIMIT,
+)
 from database import (
     Document,
     DocumentPage,
+    PageNote,
     ReadingSession,
     ReadingGoal,
     RevokedToken,
@@ -129,6 +141,10 @@ from schemas import (
     DocumentTimeEntry,
     VocabularyEntry,
     VocabularyListResponse,
+    # notes
+    PageNoteUpsertRequest,
+    PageNoteResponse,
+    DocumentNotesResponse,
     # dictionary
     WordMeaningResponse,
     # rag
@@ -156,15 +172,7 @@ logger = logging.getLogger(__name__)
 
 SESSIONS: dict[str, list[dict]] = {}
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 
-# ── Tuneable constants (all env-configurable) ─────────────────────────────────
-DEFAULT_DAILY_GOAL_MIN      = int(os.getenv("DEFAULT_DAILY_GOAL_MIN",   "60"))
-MIN_SESSION_DURATION_SECS   = int(os.getenv("MIN_SESSION_DURATION_SECS", "5"))
-DASHBOARD_CHART_DAYS        = int(os.getenv("DASHBOARD_CHART_DAYS",     "14"))
-DASHBOARD_RECENT_DOCS_LIMIT = int(os.getenv("DASHBOARD_RECENT_DOCS_LIMIT", "5"))
-DASHBOARD_VOCAB_LIMIT       = int(os.getenv("DASHBOARD_VOCAB_LIMIT",    "7"))
 
 
 # ── Text cleaning ─────────────────────────────────────────────────────────────
@@ -201,7 +209,7 @@ _scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
+    setup_logging()
     from wordlogic import init_db
     init_db()
     logger.info("Dictionary table initialised.")
@@ -297,7 +305,6 @@ def _compute_streaks(user_id: int, db: Session) -> tuple[int, int]:
     reading session (duration_seconds is not None) on that calendar day.
     Sessions are grouped by date in the DB's local timezone.
     """
-    # Pull all distinct dates (UTC) on which the user completed a session.
     rows = (
         db.query(func.date(ReadingSession.started_at).label("day"))
         .filter(
@@ -317,8 +324,6 @@ def _compute_streaks(user_id: int, db: Session) -> tuple[int, int]:
 
     # ── Current streak ────────────────────────────────────────────────────────
     current = 0
-    # Allow today OR yesterday as the most recent active day so that a user
-    # who read yesterday but not yet today doesn't lose their streak.
     expected = today if active_dates[0] == today else today - timedelta(days=1)
 
     for d in active_dates:
@@ -326,7 +331,7 @@ def _compute_streaks(user_id: int, db: Session) -> tuple[int, int]:
             current += 1
             expected -= timedelta(days=1)
         elif d < expected:
-            break   # gap — streak ends
+            break
 
     # ── Best streak ───────────────────────────────────────────────────────────
     best    = 0
@@ -396,7 +401,6 @@ def _build_recent_documents(
 
     doc_ids = [d.id for d in docs]
 
-    # Sum of duration_seconds per document for this user.
     time_rows = (
         db.query(
             ReadingSession.document_id,
@@ -1105,7 +1109,6 @@ def start_reading_session(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Verify the document exists and belongs to this user.
     _get_owned_document(data.document_id, db, current_user)
 
     session = ReadingSession(
@@ -1156,7 +1159,7 @@ def end_reading_session(
         db.query(ReadingSession)
         .filter(
             ReadingSession.id == data.session_id,
-            ReadingSession.user_id == current_user.id,   # ownership check
+            ReadingSession.user_id == current_user.id,
         )
         .first()
     )
@@ -1177,7 +1180,6 @@ def end_reading_session(
     duration_seconds = int((ended_at - session.started_at).total_seconds())
 
     if duration_seconds < MIN_DURATION_SECONDS:
-        # Discard the session — don't pollute stats with accidental opens.
         db.delete(session)
         db.commit()
         logger.debug(
@@ -1339,6 +1341,151 @@ def search_vocabulary(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# PAGE NOTES ROUTES
+# ═════════════════════════════════════════════════════════════════════════════
+
+@app.get(
+    "/documents/{document_id}/notes",
+    response_model=DocumentNotesResponse,
+    tags=["Notes"],
+    summary="Fetch all saved notes for a document",
+    description=(
+        "Called once when the user opens a document. "
+        "Returns every saved note for this (user, document) pair so the frontend "
+        "can pre-populate the correct textarea under each page in a single request. "
+        "Pages with no saved note are simply absent from the list."
+    ),
+)
+@limiter.limit("30/minute")
+def get_document_notes(
+    request: Request,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _get_owned_document(document_id, db, current_user)
+
+    notes = (
+        db.query(PageNote)
+        .filter(
+            PageNote.user_id     == current_user.id,
+            PageNote.document_id == document_id,
+        )
+        .order_by(PageNote.page_number)
+        .all()
+    )
+
+    return DocumentNotesResponse(
+        document_id=document_id,
+        notes=[
+            PageNoteResponse(
+                document_id=n.document_id,
+                page_number=n.page_number,
+                note_text=n.note_text,
+                updated_at=n.updated_at,
+            )
+            for n in notes
+        ],
+    )
+
+
+@app.put(
+    "/documents/{document_id}/pages/{page_number}/note",
+    response_model=PageNoteResponse,
+    tags=["Notes"],
+    summary="Create or update the note for a specific page",
+    description=(
+        "Upsert the note for page `page_number` of document `document_id`. "
+        "Creates a new note row if none exists, or updates the existing one. "
+        "Sending an empty string clears the note text without deleting the row. "
+        "Call this on every textarea blur / auto-save event."
+    ),
+)
+@limiter.limit("30/minute")
+def upsert_page_note(
+    request: Request,
+    document_id: str,
+    page_number: int,
+    body: PageNoteUpsertRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    doc = _get_owned_document(document_id, db, current_user)
+
+    if doc.total_pages is not None and not (1 <= page_number <= doc.total_pages):
+        raise HTTPException(
+            status_code=400,
+            detail=f"page_number must be between 1 and {doc.total_pages}.",
+        )
+
+    note = (
+        db.query(PageNote)
+        .filter(
+            PageNote.user_id     == current_user.id,
+            PageNote.document_id == document_id,
+            PageNote.page_number == page_number,
+        )
+        .first()
+    )
+
+    now = datetime.utcnow()
+
+    if note:
+        note.note_text  = body.note_text
+        note.updated_at = now
+    else:
+        note = PageNote(
+            user_id     = current_user.id,
+            document_id = document_id,
+            page_number = page_number,
+            note_text   = body.note_text,
+            created_at  = now,
+            updated_at  = now,
+        )
+        db.add(note)
+
+    db.commit()
+    db.refresh(note)
+
+    return PageNoteResponse(
+        document_id=note.document_id,
+        page_number=note.page_number,
+        note_text=note.note_text,
+        updated_at=note.updated_at,
+    )
+
+
+@app.delete(
+    "/documents/{document_id}/pages/{page_number}/note",
+    status_code=204,
+    tags=["Notes"],
+    summary="Delete the note for a specific page",
+    description=(
+        "Hard-deletes the note row for (user, document, page_number). "
+        "Returns 204 No Content whether or not a note existed — idempotent."
+    ),
+)
+@limiter.limit("20/minute")
+def delete_page_note(
+    request: Request,
+    document_id: str,
+    page_number: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _get_owned_document(document_id, db, current_user)
+
+    db.query(PageNote).filter(
+        PageNote.user_id     == current_user.id,
+        PageNote.document_id == document_id,
+        PageNote.page_number == page_number,
+    ).delete()
+
+    db.commit()
+    return Response(status_code=204)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # DICTIONARY ROUTES
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1375,7 +1522,6 @@ def word_meaning(
     if result["source"] == "Error":
         raise HTTPException(status_code=404, detail=f"No definition found for '{word}'.")
 
-    # Log the lookup — links the word to the user and optionally to a document.
     log_vocabulary_lookup(
         user_id=current_user.id,
         word=word,

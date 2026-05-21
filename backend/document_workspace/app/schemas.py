@@ -1,17 +1,12 @@
 """
 schemas.py — Pydantic request / response models for all API endpoints.
 
-Changes (dashboard update)
+Changes (notes update)
 --------------------------
 New schemas added:
-  - ReadingSessionStartRequest / ReadingSessionStartResponse
-  - ReadingSessionEndRequest   / ReadingSessionEndResponse
-  - ReadingGoalRequest         / ReadingGoalResponse
-  - DailyReadingEntry          (one bar in the chart)
-  - DocumentTimeEntry          (time spent per recent doc)
-  - VocabularyEntry            (one word in the vocabulary panel)
-  - DashboardResponse          (aggregated GET /me/dashboard)
-  - VocabularyListResponse     (GET /me/vocabulary)
+  - PageNoteUpsertRequest   : body for PUT /documents/{id}/pages/{n}/note
+  - PageNoteResponse        : single note returned after save
+  - DocumentNotesResponse   : all notes for a document (bulk fetch on open)
 """
 
 from __future__ import annotations
@@ -232,18 +227,13 @@ class DailyReadingEntry(BaseModel):
 
 
 class DocumentTimeEntry(BaseModel):
-    """
-    Per-document row shown in the Recent Documents list.
-    Augments DocumentResponse with time_spent_seconds so the frontend
-    can display '—' or a formatted duration next to each doc.
-    """
     id:               str
     filename:         str
     file_type:        str
     file_size_bytes:  Optional[int]  = None
     total_pages:      Optional[int]  = None
     created_at:       datetime
-    time_spent_seconds: int          # 0 if never read
+    time_spent_seconds: int
 
 
 class VocabularyEntry(BaseModel):
@@ -251,7 +241,7 @@ class VocabularyEntry(BaseModel):
     word:          str
     meaning:       str
     synonym:       Optional[str] = None
-    document_name: Optional[str] = None   # filename of the source doc
+    document_name: Optional[str] = None
     document_id:   Optional[str] = None
     looked_up_at:  datetime
 
@@ -261,22 +251,20 @@ class VocabularyEntry(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class DashboardStatsResponse(BaseModel):
-    """The four stat cards at the top of the dashboard."""
-    total_time_read_minutes:  float   # all-time total
-    today_read_minutes:       float   # today only
-    daily_goal_minutes:       int     # user's goal (default 60)
-    documents_read:           int     # docs with ≥ 1 reading session
-    total_documents_uploaded: int     # all uploaded docs
-    current_streak_days:      int     # consecutive days read
-    best_streak_days:         int     # all-time best streak
+    total_time_read_minutes:  float
+    today_read_minutes:       float
+    daily_goal_minutes:       int
+    documents_read:           int
+    total_documents_uploaded: int
+    current_streak_days:      int
+    best_streak_days:         int
 
 
 class DashboardResponse(BaseModel):
-    """Full payload for GET /me/dashboard — one request, everything the UI needs."""
-    stats:           DashboardStatsResponse
-    daily_chart:     List[DailyReadingEntry]    # last 14 days
-    recent_documents: List[DocumentTimeEntry]   # last 5 docs
-    vocabulary:      List[VocabularyEntry]       # last 7 words
+    stats:            DashboardStatsResponse
+    daily_chart:      List[DailyReadingEntry]
+    recent_documents: List[DocumentTimeEntry]
+    vocabulary:       List[VocabularyEntry]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -327,7 +315,7 @@ class ChatResponse(BaseModel):
 
 class SummarizeRequest(BaseModel):
     text:   str = Field(..., min_length=1, max_length=50_000)
-    length: str = Field(default="medium")   # short | medium | long | bullets
+    length: str = Field(default="medium")
 
 
 class SummarizeResponse(BaseModel):
@@ -352,3 +340,41 @@ class SessionHistoryResponse(BaseModel):
 class HealthResponse(BaseModel):
     status:   str
     sessions: int
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Page Notes  — per-page sticky notes in the document viewer
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PageNoteUpsertRequest(BaseModel):
+    """
+    Body for PUT /documents/{document_id}/pages/{page_number}/note.
+    An empty string is valid — it clears an existing note.
+    """
+    note_text: str = Field(
+        ...,
+        max_length=50_000,
+        description="Note text for this page. Empty string clears the note.",
+    )
+
+
+class PageNoteResponse(BaseModel):
+    """
+    Returned after a successful note save (PUT) or single-page fetch (GET).
+    """
+    document_id: str
+    page_number: int
+    note_text:   str
+    updated_at:  datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DocumentNotesResponse(BaseModel):
+    """
+    Returned by GET /documents/{document_id}/notes.
+    Contains ALL saved notes for this document for the current user so the
+    frontend can pre-populate every page textarea in a single request.
+    """
+    document_id: str
+    notes:       List[PageNoteResponse]

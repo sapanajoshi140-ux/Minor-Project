@@ -1,17 +1,13 @@
 import asyncio
-import os
 import io
 import requests
 import edge_tts
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, text, Column, String, Text
 from sqlalchemy.orm import declarative_base, Session
 
-load_dotenv()
+from config import DATABASE_URL
 
 # ─── Database Setup ────────────────────────────────────────────────────────────
-
-DATABASE_URL = os.getenv("DATABASE_URL")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 Base = declarative_base()
@@ -208,7 +204,7 @@ def log_vocabulary_lookup(
 # PRONUNCIATION FUNCTIONS  (Edge TTS — neural voices, free, no API key)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-TTS_VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
+TTS_VOICE = "en-US-JennyNeural"
 
 
 async def _edge_tts_to_buffer(text_to_speak: str) -> io.BytesIO:

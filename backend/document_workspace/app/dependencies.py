@@ -13,17 +13,8 @@ from sqlalchemy.orm import Session
 
 from database import User, RevokedToken, get_db
 
-import os
 import jwt
-from dotenv import load_dotenv
-
-load_dotenv()
-
-_SECRET_KEY = os.getenv("JWT_SECRET")
-if not _SECRET_KEY:
-    raise ValueError("JWT_SECRET not found in environment variables.")
-
-_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+from config import JWT_SECRET as _SECRET_KEY, JWT_ALGORITHM as _ALGORITHM
 
 
 def _decode_token(token: str) -> dict:

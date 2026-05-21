@@ -19,36 +19,30 @@ Setup (one time only)
 ---------------------
 1. Run:  python download_models.py
 2. Add to .env:
-       TROCR_PRINTED_PATH=./models/trocr-large-printed
        TROCR_HANDWRITTEN_PATH=./models/trocr-large-handwritten
 
-Model variants
---------------
-"printed"     → trocr-large-printed      (~1.1 GB)  best for scanned printed docs
+Model variant
+-------------
 "handwritten" → trocr-large-handwritten  (~2.2 GB)  best for cursive / mixed handwriting
 
-Both are lazily loaded and cached for the lifetime of the server process.
+Printed/scanned documents use Tesseract (ocr_service.py), not TrOCR.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Literal
 
-from dotenv import load_dotenv
-
-load_dotenv()
+from config import TROCR_HANDWRITTEN_PATH
 
 logger = logging.getLogger(__name__)
 
-# ── Local model paths (from .env) ─────────────────────────────────────────────
+# ── Local model path ──────────────────────────────────────────────────────────
 
 _LOCAL_PATHS: dict[str, str] = {
-    "printed":     os.getenv("TROCR_PRINTED_PATH",     "microsoft/trocr-large-printed"),
-    "handwritten": os.getenv("TROCR_HANDWRITTEN_PATH", "microsoft/trocr-large-handwritten"),
+    "handwritten": TROCR_HANDWRITTEN_PATH,
 }
 
 # In-process singleton cache: mode → (processor, model, device) | _LOAD_FAILED

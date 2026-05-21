@@ -1,11 +1,28 @@
 @import "tailwindcss";
 
+/* ── Base ── */
 body {
   font-family: sans-serif;
   background: rgb(239, 246, 255);
 }
 
 /* ── PDF.js text layer ── */
+/*
+  The div uses className="pdf-text-layer" in PdfViewer.jsx.
+  Spans are positioned absolutely by PDF.js to sit exactly over the canvas text.
+  We make them transparent so the canvas rendering shows through,
+  but the DOM text is still selectable and searchable.
+*/
+.pdf-text-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  line-height: 1;
+  user-select: text;
+  pointer-events: auto;
+}
+
 .pdf-text-layer span,
 .pdf-text-layer br {
   color: transparent;
@@ -16,7 +33,18 @@ body {
   user-select: text;
 }
 
+/* Highlight color when user selects text */
 .pdf-text-layer span::selection {
-  background: rgba(59, 130, 246, 0.3);
+  background: rgba(59, 130, 246, 0.35);
   color: transparent;
+}
+
+/* ── react-pdf fallback (keep for compatibility if used elsewhere) ── */
+.react-pdf__Page__textContent {
+  user-select: text;
+  cursor: text;
+}
+
+.react-pdf__Page__canvas {
+  pointer-events: none;
 }

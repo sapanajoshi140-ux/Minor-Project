@@ -1,0 +1,47 @@
+# ── Environment ───────────────────────────────────────────────
+.env
+*.env
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.egg
+*.egg-info/
+dist/
+build/
+
+# ── Virtual environment ───────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Uploads (user files — never commit) ──────────────────────
+document_workspace/app/uploads/*
+!document_workspace/app/uploads/.gitkeep
+uploads/*
+!uploads/.gitkeep
+document_workspace/models/*
+
+# ── EasyOCR model weights (~200 MB — never commit) ───────────
+document_workspace/app/.easyocr_models/
+.easyocr_models/
+
+# ── IDE ───────────────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Pytest / coverage ─────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/

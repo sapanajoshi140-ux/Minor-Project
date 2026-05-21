@@ -182,7 +182,7 @@ async def signup(request: Request, data: Signup, db: Session = Depends(get_db)):
         db.add(user)
 
         token = create_email_token(user.email)
-        link  = f"{BACKEND_URL}/verify-email?token={token}"
+        link  = f"{FRONTEND_URL}/verify-email?token={token}"
         await send_email(user.email, "Verify your email", verify_email_html(user.full_name, link))
 
         db.commit()
@@ -225,7 +225,7 @@ async def resend_verification(request: Request, data: ResendVerificationRequest,
         return {"message": "Email already verified"}
 
     token = create_email_token(user.email)
-    link  = f"{BACKEND_URL}/verify-email?token={token}"
+    link  = f"{FRONTEND_URL}/verify-email?token={token}"
     await send_email(user.email, "Verify your email", verify_email_html(user.full_name, link))
     return {"message": "Verification email sent"}
 

@@ -1,12 +1,20 @@
 """
 schemas.py — Pydantic request / response models for all API endpoints.
 
-Changes (notes update)
---------------------------
-New schemas added:
-  - PageNoteUpsertRequest   : body for PUT /documents/{id}/pages/{n}/note
-  - PageNoteResponse        : single note returned after save
-  - DocumentNotesResponse   : all notes for a document (bulk fetch on open)
+Changes (OCR formatting update)
+---------------------------------
+Updated:
+  - PageResponse            : adds formatted_text, formatting_status fields.
+  - DocumentResponse        : unchanged (processing_status covers upload phase).
+  - DocumentViewResponse    : adds formatting_summary for UX status banners.
+
+New schemas:
+  - FormattingStatusResponse : GET /document/{id}/formatting-status
+  - PageFormattingEntry      : one row in the status summary.
+  - ReformatResponse         : POST /document/{id}/reformat
+
+Previous changes (notes update):
+  - PageNoteUpsertRequest, PageNoteResponse, DocumentNotesResponse.
 """
 
 from __future__ import annotations
@@ -34,8 +42,19 @@ class StorageUsageResponse(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class PageResponse(BaseModel):
+    """
+    Single page payload.
+
+    display_text is a computed convenience field populated by the API layer —
+    it returns formatted_text when formatting is complete, otherwise
+    extracted_text, so the frontend never needs to implement the fallback logic.
+    """
     page_number:      int
-    extracted_text:   Optional[str]   = None
+    extracted_text:   Optional[str]   = None   # raw OCR text
+    raw_ocr_text:     Optional[str]   = None   # immutable original OCR copy
+    formatted_text:   Optional[str]   = None   # Ollama-formatted (None until ready)
+    display_text:     Optional[str]   = None   # computed: formatted_text ?? extracted_text
+    formatting_status: Optional[str]  = None   # pending|processing|completed|failed|skipped
     ocr_type:         Optional[str]   = None
     confidence_score: Optional[float] = None
 
@@ -83,20 +102,37 @@ class DocumentListResponse(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class OcrLine(BaseModel):
-    page_number:      int
-    line_number:      int
-    text:             str
-    ocr_type:         Optional[str]   = None
-    confidence_score: Optional[float] = None
+    page_number:       int
+    line_number:       int
+    text:              str              # display text (formatted if available)
+    raw_text:          Optional[str]   = None  # raw OCR line (for diff/revert)
+    ocr_type:          Optional[str]   = None
+    confidence_score:  Optional[float] = None
+    formatting_status: Optional[str]   = None  # page-level status propagated to line
+
+
+class FormattingSummary(BaseModel):
+    """
+    Aggregated formatting progress for a document — included in view responses
+    so the frontend can show a status banner without a separate API call.
+    """
+    total_pages:      int
+    pending:          int
+    processing:       int
+    completed:        int
+    failed:           int
+    skipped:          int
+    all_done:         bool   # True when every page is completed|failed|skipped
 
 
 class DocumentViewResponse(BaseModel):
-    document_id:       str
-    filename:          str
-    document_category: str
-    total_pages:       Optional[int]  = None
-    pdf_url:           Optional[str]  = None
-    ocr_lines:         List[OcrLine]  = []
+    document_id:        str
+    filename:           str
+    document_category:  str
+    total_pages:        Optional[int]           = None
+    pdf_url:            Optional[str]           = None
+    ocr_lines:          List[OcrLine]           = []
+    formatting_summary: Optional[FormattingSummary] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -173,6 +209,42 @@ class LineResponse(BaseModel):
     page_number: int
     line_number: int
     text:        str
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OCR Formatting status  — GET /document/{id}/formatting-status
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PageFormattingEntry(BaseModel):
+    """Per-page formatting status row."""
+    page_number:            int
+    formatting_status:      str
+    formatting_started_at:  Optional[datetime] = None
+    formatting_completed_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class FormattingStatusResponse(BaseModel):
+    """
+    Full formatting status for a document.
+
+    Frontend usage
+    --------------
+    Poll GET /document/{id}/formatting-status every 3–5 s while
+    summary.all_done is False.  Once all_done is True, refresh the
+    page view to display formatted_text.
+    """
+    document_id: str
+    summary:     FormattingSummary
+    pages:       List[PageFormattingEntry]
+
+
+class ReformatResponse(BaseModel):
+    """Returned by POST /document/{id}/reformat."""
+    document_id:    str
+    pages_enqueued: int
+    message:        str
 
 
 # ══════════════════════════════════════════════════════════════════════════════

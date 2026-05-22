@@ -192,6 +192,32 @@ class ReadingSessionStartResponse(BaseModel):
 
 class ReadingSessionEndRequest(BaseModel):
     session_id: int = Field(..., description="ID returned by POST /reading-session/start.")
+    active_seconds: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Total seconds of *active* reading time tracked by the frontend "
+            "(tab visible + user interacted within the last 5 minutes). "
+            "When provided, the backend stores this value directly instead of "
+            "computing wall-clock duration, so idle open tabs are not counted. "
+            "Omitting this field falls back to wall-clock duration for "
+            "backwards compatibility."
+        ),
+    )
+
+
+class ReadingSessionHeartbeatRequest(BaseModel):
+    session_id:     int = Field(..., description="ID returned by POST /reading-session/start.")
+    active_seconds: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Cumulative active seconds since the session started, as measured "
+            "by the frontend tracker (tab visible + recent user activity). "
+            "Sent every ~30 s so the server has an up-to-date partial total "
+            "even if the session is never formally closed."
+        ),
+    )
 
 
 class ReadingSessionEndResponse(BaseModel):

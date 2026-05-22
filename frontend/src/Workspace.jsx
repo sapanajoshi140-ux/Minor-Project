@@ -1,5 +1,11 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Workspace.jsx  —  refactored; shared code lives in ../shared/
+// ─────────────────────────────────────────────────────────────────────────────
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import PdfViewer from './PdfViewer';
+import { getFreshHeaders, isValidHeaders, getToken } from './Docutils';
+import { Spinner, Toast, EndOfDocument, menuBtnStyle } from './Sharedui';
+import { useBottomInfiniteScroll } from './Hooks';
 
 const Workspace = ({
   documentId,
@@ -10,62 +16,52 @@ const Workspace = ({
   onBack,
   onAuthError,
 }) => {
-  const [pages, setPages] = useState([]);
-  const [currentPage, setCurrentPage] = useState(0);
-  const currentPageRef = useRef(0);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const [selectedText, setSelectedText] = useState('');
-  const [menuConfig, setMenuConfig] = useState({ show: false, x: 0, y: 0, type: 'word', mode: 'options' });
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [drawerContent, setDrawerContent] = useState({ type: '', text: '', result: '' });
-  const [isDrawerLoading, setIsDrawerLoading] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [pdfUrl, setPdfUrl] = useState('');
+  const [pages,          setPages]          = useState([]);
+  const [currentPage,    setCurrentPage]    = useState(0);
+  const currentPageRef                      = useRef(0);
+  const [isLoadingMore,  setIsLoadingMore]  = useState(false);
+  const [selectedText,   setSelectedText]   = useState('');
+  const [menuConfig,     setMenuConfig]     = useState({ show: false, x: 0, y: 0, type: 'word' });
+  const [isDrawerOpen,   setIsDrawerOpen]   = useState(false);
+  const [drawerContent,  setDrawerContent]  = useState({ type: '', text: '', result: '' });
+  const [isDrawerLoading,setIsDrawerLoading]= useState(false);
+  const [isSpeaking,     setIsSpeaking]     = useState(false);
+  const [pdfUrl,         setPdfUrl]         = useState('');
 
-  // ── Document metadata ──────────────────────────────────────────────────────
-  const [docMeta, setDocMeta] = useState(null);
+  // Document metadata
+  const [docMeta,    setDocMeta]    = useState(null);
   const [totalPages, setTotalPages] = useState(totalPagesProp || 0);
 
-  // ── PDF generation state ───────────────────────────────────────────────────
+  // PDF generation
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
-  const [pdfGenStatus, setPdfGenStatus] = useState('');
-  const [pdfGenMessage, setPdfGenMessage] = useState('');
+  const [pdfGenStatus,    setPdfGenStatus]     = useState('');
+  const [pdfGenMessage,   setPdfGenMessage]    = useState('');
 
-  // ── Bulk save ─────────────────────────────────────────────────────────────
-  const [dirtyPages, setDirtyPages] = useState(new Set());
-  const [isBulkSaving, setIsBulkSaving] = useState(false);
-  const [bulkSaveStatus, setBulkSaveStatus] = useState('');
+  // Bulk save
+  const [dirtyPages,    setDirtyPages]    = useState(new Set());
+  const [isBulkSaving,  setIsBulkSaving]  = useState(false);
+  const [bulkSaveStatus,setBulkSaveStatus]= useState('');
 
-  // ── Line-streaming state ───────────────────────────────────────────────────
+  // Streaming
   const [streamingPage, setStreamingPage] = useState(null);
 
   const scrollRef = useRef(null);
-  const bottomRef = useRef(null);
 
   const isTextDoc = documentCategory === 'text';
-  const hasMore = currentPage < totalPages;
+  const hasMore   = currentPage < totalPages;
 
-  const getToken = () => localStorage.getItem('access_token') || '';
+  // ── Auth guard helper ────────────────────────────────────────────────────────
+  // Returns fresh headers or calls onAuthError + returns null
+  const guardedHeaders = useCallback(() => {
+    const h = getFreshHeaders();
+    if (!isValidHeaders(h)) { onAuthError(); return null; }
+    return h;
+  }, [onAuthError]);
 
-  const getFreshHeaders = () => ({
-    Authorization: `Bearer ${getToken()}`,
-  });
-
-  const isValidHeaders = (headers) => {
-    if (!headers) return false;
-    const auth = headers.Authorization || '';
-    return (
-      auth.startsWith('Bearer ') &&
-      auth !== 'Bearer null' &&
-      auth !== 'Bearer undefined' &&
-      auth !== 'Bearer '
-    );
-  };
-
-  // ── GET /document/{id} ────────────────────────────────────────────────────
+  // ── Document metadata ────────────────────────────────────────────────────────
   const fetchDocumentMeta = useCallback(async () => {
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) { onAuthError(); return; }
+    const headers = guardedHeaders();
+    if (!headers) return;
     try {
       const res = await fetch(`${apiUrl}/document/${documentId}`, { headers });
       if (res.status === 401) { onAuthError(); return; }
@@ -76,32 +72,37 @@ const Workspace = ({
     } catch (err) {
       console.error('Failed to fetch document metadata:', err);
     }
-  }, [documentId, apiUrl, onAuthError]);
+  }, [documentId, apiUrl, guardedHeaders, onAuthError]);
 
-  useEffect(() => {
-    fetchDocumentMeta();
-  }, []);
+  useEffect(() => { fetchDocumentMeta(); }, []);
 
-  // Build PDF URL after mount so token is always fresh
+  // Build PDF URL after mount (token always fresh)
   useEffect(() => {
     if (isTextDoc) {
-      const token = getToken();
-      setPdfUrl(`${apiUrl}/document/${documentId}/pdf?token=${encodeURIComponent(token)}`);
+      setPdfUrl(`${apiUrl}/document/${documentId}/pdf?token=${encodeURIComponent(getToken())}`);
     }
   }, [isTextDoc, apiUrl, documentId]);
 
-  // ── Save edited page ───────────────────────────────────────────────────────
+  // ── Auto-dismiss toasts ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!bulkSaveStatus) return;
+    const id = setTimeout(() => setBulkSaveStatus(''), 3000);
+    return () => clearTimeout(id);
+  }, [bulkSaveStatus]);
+
+  useEffect(() => {
+    if (!pdfGenStatus) return;
+    const id = setTimeout(() => { setPdfGenStatus(''); setPdfGenMessage(''); }, 4000);
+    return () => clearTimeout(id);
+  }, [pdfGenStatus]);
+
+  // ── Save single page ─────────────────────────────────────────────────────────
   const handleContentChange = async (pageNum, newText) => {
-    setPages(prev => {
-      const updated = [...prev];
-      const idx = updated.findIndex(p => p.page_number === pageNum);
-      if (idx !== -1) updated[idx].extracted_text = newText;
-      return updated;
-    });
+    setPages(prev => prev.map(p => p.page_number === pageNum ? { ...p, extracted_text: newText } : p));
     setDirtyPages(prev => new Set(prev).add(pageNum));
 
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) { onAuthError(); return; }
+    const headers = guardedHeaders();
+    if (!headers) return;
 
     try {
       const res = await fetch(`${apiUrl}/document/${documentId}/page/${pageNum}`, {
@@ -111,25 +112,20 @@ const Workspace = ({
       });
       if (res.status === 401) { onAuthError(); return; }
       if (res.ok) {
-        setDirtyPages(prev => {
-          const next = new Set(prev);
-          next.delete(pageNum);
-          return next;
-        });
+        setDirtyPages(prev => { const n = new Set(prev); n.delete(pageNum); return n; });
       }
     } catch (err) {
       console.error('Failed to save edit:', err);
     }
   };
 
-  // ── Bulk save ──────────────────────────────────────────────────────────────
+  // ── Bulk save ────────────────────────────────────────────────────────────────
   const handleBulkSave = useCallback(async () => {
     if (dirtyPages.size === 0) return;
     setIsBulkSaving(true);
-    setBulkSaveStatus('');
 
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) { onAuthError(); return; }
+    const headers = guardedHeaders();
+    if (!headers) { setIsBulkSaving(false); return; }
 
     const payload = {
       pages: pages
@@ -149,9 +145,9 @@ const Workspace = ({
 
       if (data.updated_pages?.length) {
         setDirtyPages(prev => {
-          const next = new Set(prev);
-          data.updated_pages.forEach(n => next.delete(n));
-          return next;
+          const n = new Set(prev);
+          data.updated_pages.forEach(num => n.delete(num));
+          return n;
         });
       }
       setBulkSaveStatus('success');
@@ -160,18 +156,14 @@ const Workspace = ({
       setBulkSaveStatus('error');
     } finally {
       setIsBulkSaving(false);
-      setTimeout(() => setBulkSaveStatus(''), 3000);
     }
-  }, [dirtyPages, pages, documentId, apiUrl, onAuthError]);
+  }, [dirtyPages, pages, documentId, apiUrl, guardedHeaders, onAuthError]);
 
-  // ── Generate PDF ───────────────────────────────────────────────────────────
+  // ── Generate PDF ─────────────────────────────────────────────────────────────
   const handleGeneratePdf = async () => {
     setIsGeneratingPdf(true);
-    setPdfGenStatus('');
-    setPdfGenMessage('');
-
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) { onAuthError(); return; }
+    const headers = guardedHeaders();
+    if (!headers) { setIsGeneratingPdf(false); return; }
 
     try {
       const res = await fetch(`${apiUrl}/documents/${documentId}/generate-pdf`, {
@@ -184,46 +176,37 @@ const Workspace = ({
 
       setPdfGenStatus('success');
       setPdfGenMessage(data.message || 'PDF generated successfully.');
-
-      const token = getToken();
-      setPdfUrl(
-        `${apiUrl}/document/${documentId}/pdf?token=${encodeURIComponent(token)}&t=${Date.now()}`
-      );
+      setPdfUrl(`${apiUrl}/document/${documentId}/pdf?token=${encodeURIComponent(getToken())}&t=${Date.now()}`);
     } catch (err) {
       setPdfGenStatus('error');
       setPdfGenMessage(err.message || 'Failed to generate PDF.');
     } finally {
       setIsGeneratingPdf(false);
-      setTimeout(() => { setPdfGenStatus(''); setPdfGenMessage(''); }, 4000);
     }
   };
 
-  // ── NDJSON streaming ───────────────────────────────────────────────────────
+  // ── NDJSON streaming ─────────────────────────────────────────────────────────
   const fetchPageStreaming = useCallback(async (pageNum) => {
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) { onAuthError(); return null; }
+    const headers = guardedHeaders();
+    if (!headers) return null;
 
     setStreamingPage(pageNum);
-
-    setPages(prev => {
-      if (prev.find(p => p.page_number === pageNum)) return prev;
-      return [...prev, { page_number: pageNum, extracted_text: '', _streaming: true }];
-    });
+    setPages(prev =>
+      prev.find(p => p.page_number === pageNum)
+        ? prev
+        : [...prev, { page_number: pageNum, extracted_text: '', _streaming: true }]
+    );
 
     try {
-      const res = await fetch(
-        `${apiUrl}/document/${documentId}/page/${pageNum}/lines`,
-        { headers }
-      );
+      const res = await fetch(`${apiUrl}/document/${documentId}/page/${pageNum}/lines`, { headers });
       if (res.status === 401) { onAuthError(); return null; }
-
       if (!res.ok) {
         setPages(prev => prev.filter(p => p.page_number !== pageNum));
         setStreamingPage(null);
         return null;
       }
 
-      const reader = res.body.getReader();
+      const reader  = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
 
@@ -248,15 +231,11 @@ const Workspace = ({
                 )
               );
             }
-          } catch {
-            // malformed JSON line — skip
-          }
+          } catch { /* malformed JSON line — skip */ }
         }
       }
 
-      setPages(prev =>
-        prev.map(p => p.page_number === pageNum ? { ...p, _streaming: false } : p)
-      );
+      setPages(prev => prev.map(p => p.page_number === pageNum ? { ...p, _streaming: false } : p));
       setStreamingPage(null);
       return true;
     } catch (err) {
@@ -265,34 +244,28 @@ const Workspace = ({
       setStreamingPage(null);
       return null;
     }
-  }, [documentId, apiUrl, onAuthError]);
+  }, [documentId, apiUrl, guardedHeaders, onAuthError]);
 
-  // ── Single page fallback ───────────────────────────────────────────────────
+  // ── Single-page fallback ─────────────────────────────────────────────────────
   const fetchPage = useCallback(async (pageNum) => {
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) { onAuthError(); return null; }
-    const res = await fetch(
-      `${apiUrl}/document/${documentId}/page/${pageNum}`,
-      { headers }
-    );
+    const headers = guardedHeaders();
+    if (!headers) return null;
+    const res = await fetch(`${apiUrl}/document/${documentId}/page/${pageNum}`, { headers });
     if (res.status === 401) { onAuthError(); return null; }
     if (!res.ok) throw new Error(`Failed to fetch page ${pageNum}`);
     return await res.json();
-  }, [documentId, apiUrl, onAuthError]);
+  }, [documentId, apiUrl, guardedHeaders, onAuthError]);
 
-  // ── Batch prefetch ─────────────────────────────────────────────────────────
+  // ── Batch prefetch ───────────────────────────────────────────────────────────
   const prefetchPageBatch = useCallback(async (afterPage, limit = 5) => {
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) return;
-
+    const headers = guardedHeaders();
+    if (!headers) return;
     const nextPageNum = afterPage + 1;
     if (nextPageNum > totalPages) return;
 
-    const batchNum = Math.ceil(nextPageNum / limit);
-
     try {
       const res = await fetch(
-        `${apiUrl}/document/${documentId}/pages?page=${batchNum}&limit=${limit}`,
+        `${apiUrl}/document/${documentId}/pages?page=${Math.ceil(nextPageNum / limit)}&limit=${limit}`,
         { headers }
       );
       if (!res.ok || res.status === 401) return;
@@ -300,22 +273,22 @@ const Workspace = ({
 
       if (data.pages?.length) {
         setPages(prev => {
-          const existingNums = new Set(prev.map(p => p.page_number));
-          const newPages = data.pages.filter(p => !existingNums.has(p.page_number));
-          return newPages.length ? [...prev, ...newPages] : prev;
+          const existing = new Set(prev.map(p => p.page_number));
+          const fresh    = data.pages.filter(p => !existing.has(p.page_number));
+          return fresh.length ? [...prev, ...fresh] : prev;
         });
-        const lastPrefetched = data.pages[data.pages.length - 1].page_number;
-        if (lastPrefetched > currentPageRef.current) {
-          currentPageRef.current = lastPrefetched;
-          setCurrentPage(lastPrefetched);
+        const last = data.pages[data.pages.length - 1].page_number;
+        if (last > currentPageRef.current) {
+          currentPageRef.current = last;
+          setCurrentPage(last);
         }
       }
     } catch (err) {
       console.error('Batch prefetch failed:', err);
     }
-  }, [documentId, apiUrl, totalPages]);
+  }, [documentId, apiUrl, totalPages, guardedHeaders]);
 
-  // ── Load next page ─────────────────────────────────────────────────────────
+  // ── Load next page ───────────────────────────────────────────────────────────
   const loadNextPage = useCallback(async () => {
     if (isLoadingMore || currentPageRef.current >= totalPages) return;
     setIsLoadingMore(true);
@@ -323,112 +296,77 @@ const Workspace = ({
       const nextPage = currentPageRef.current + 1;
 
       const streamed = await fetchPageStreaming(nextPage);
-
       if (streamed === null) {
         const pageData = await fetchPage(nextPage);
         if (pageData) {
-          setPages(prev => {
-            if (prev.find(p => p.page_number === pageData.page_number)) return prev;
-            return [...prev, pageData];
-          });
+          setPages(prev =>
+            prev.find(p => p.page_number === pageData.page_number) ? prev : [...prev, pageData]
+          );
         }
       }
 
       currentPageRef.current = nextPage;
       setCurrentPage(nextPage);
 
-      if (nextPage === 1) {
-        prefetchPageBatch(nextPage);
-      }
+      if (nextPage === 1) prefetchPageBatch(nextPage);
     } catch (err) {
       console.error('Failed to load page:', err);
     }
     setIsLoadingMore(false);
   }, [isLoadingMore, totalPages, fetchPageStreaming, fetchPage, prefetchPageBatch]);
 
-  // Load first page on mount (scanned docs only)
-  useEffect(() => {
-    if (!isTextDoc) loadNextPage();
-  }, []);
+  // First page on mount (scanned only)
+  useEffect(() => { if (!isTextDoc) loadNextPage(); }, []);
 
-  // IntersectionObserver for infinite scroll
-  useEffect(() => {
-    if (!bottomRef.current || isTextDoc || currentPage === 0) return;
-    const observer = new IntersectionObserver(
-      (entries) => { if (entries[0].isIntersecting) loadNextPage(); },
-      { threshold: 0.1 }
-    );
-    observer.observe(bottomRef.current);
-    return () => observer.disconnect();
-  }, [loadNextPage, isTextDoc, currentPage]);
+  // Infinite scroll sentinel
+  const bottomRef = useBottomInfiniteScroll(loadNextPage, !isTextDoc && currentPage > 0);
 
-  // Stop speech when leaving
-  useEffect(() => {
-    return () => window.speechSynthesis?.cancel();
-  }, []);
+  // Cancel TTS on unmount
+  useEffect(() => () => window.speechSynthesis?.cancel(), []);
 
-  // ── Text selection → floating menu ────────────────────────────────────────
-  // Handles BOTH scanned docs (contentEditable divs) and text docs (PDF text layer)
+  // ── Text-selection → floating menu ──────────────────────────────────────────
   const handleMouseUp = (e) => {
-    // Don't trigger if click is inside the floating menu or drawer
     if (e.target.closest('.floating-menu') || e.target.closest('.workspace-drawer')) return;
+    const text = window.getSelection()?.toString().trim();
+    if (!text) { setMenuConfig(prev => ({ ...prev, show: false })); return; }
 
-    const selection = window.getSelection();
-    const selectionText = selection?.toString().trim();
-
-    if (!selectionText) {
-      setMenuConfig(prev => ({ ...prev, show: false }));
-      return;
-    }
-
-    const range = selection.getRangeAt(0);
-    const rect = range.getBoundingClientRect();
-    const wordCount = selectionText.split(/\s+/).length;
-    setSelectedText(selectionText);
-
-    let menuType = 'word';
-    if (wordCount > 1 && wordCount <= 20) menuType = 'short';
-    if (wordCount > 20) menuType = 'paragraph';
-
+    const rect      = window.getSelection().getRangeAt(0).getBoundingClientRect();
+    const wordCount = text.split(/\s+/).length;
+    setSelectedText(text);
     setMenuConfig({
       show: true,
       x: rect.left + rect.width / 2,
-      y: rect.top - 60,       // 60px above the selection — works for fixed positioning
-      type: menuType,
-      mode: 'options',
+      y: rect.top - 60,
+      type: wordCount === 1 ? 'word' : wordCount <= 20 ? 'short' : 'paragraph',
     });
   };
 
-  // Hide menu when clicking anywhere else
   const handleMouseDown = (e) => {
-    if (!e.target.closest('.floating-menu')) {
-      setMenuConfig(prev => ({ ...prev, show: false }));
-    }
+    if (!e.target.closest('.floating-menu')) setMenuConfig(prev => ({ ...prev, show: false }));
   };
 
-  // ── Word definition ────────────────────────────────────────────────────────
-  const handleMeaningClick = async (e) => {
-    e.stopPropagation();
-    setMenuConfig(prev => ({ ...prev, show: false }));
-    setDrawerContent({ type: 'meaning', text: selectedText, result: '' });
+  // ── AI actions ───────────────────────────────────────────────────────────────
+  const openDrawer = (type) => {
+    setDrawerContent({ type, text: selectedText, result: '' });
     setIsDrawerLoading(true);
     setIsDrawerOpen(true);
+    setMenuConfig(prev => ({ ...prev, show: false }));
+  };
 
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) { onAuthError(); return; }
-
+  const handleMeaningClick = async (e) => {
+    e.stopPropagation();
+    openDrawer('meaning');
+    const headers = guardedHeaders();
+    if (!headers) return;
     try {
-      const res = await fetch(`${apiUrl}/ai/meaning`, {
+      const res  = await fetch(`${apiUrl}/ai/meaning`, {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({ word: selectedText }),
       });
       if (res.status === 401) { onAuthError(); return; }
       const data = await res.json();
-      setDrawerContent(prev => ({
-        ...prev,
-        result: data.meaning || data.detail || 'No definition found.',
-      }));
+      setDrawerContent(prev => ({ ...prev, result: data.meaning || data.detail || 'No definition found.' }));
     } catch {
       setDrawerContent(prev => ({ ...prev, result: 'Failed to fetch definition. Please try again.' }));
     } finally {
@@ -436,29 +374,20 @@ const Workspace = ({
     }
   };
 
-  // ── Summarize ──────────────────────────────────────────────────────────────
   const handleSummaryClick = async (e) => {
     e.stopPropagation();
-    setMenuConfig(prev => ({ ...prev, show: false }));
-    setDrawerContent({ type: 'summary', text: selectedText, result: '' });
-    setIsDrawerLoading(true);
-    setIsDrawerOpen(true);
-
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) { onAuthError(); return; }
-
+    openDrawer('summary');
+    const headers = guardedHeaders();
+    if (!headers) return;
     try {
-      const res = await fetch(`${apiUrl}/ai/summarize`, {
+      const res  = await fetch(`${apiUrl}/ai/summarize`, {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: selectedText }),
       });
       if (res.status === 401) { onAuthError(); return; }
       const data = await res.json();
-      setDrawerContent(prev => ({
-        ...prev,
-        result: data.summary || data.detail || 'No summary generated.',
-      }));
+      setDrawerContent(prev => ({ ...prev, result: data.summary || data.detail || 'No summary generated.' }));
     } catch {
       setDrawerContent(prev => ({ ...prev, result: 'Failed to generate summary. Please try again.' }));
     } finally {
@@ -466,37 +395,25 @@ const Workspace = ({
     }
   };
 
-  // ── Text-to-speech ─────────────────────────────────────────────────────────
   const handleTTS = (e) => {
     e.stopPropagation();
     setMenuConfig(prev => ({ ...prev, show: false }));
-
-    if (isSpeaking) {
-      window.speechSynthesis.cancel();
-      setIsSpeaking(false);
-      return;
-    }
-
+    if (isSpeaking) { window.speechSynthesis.cancel(); setIsSpeaking(false); return; }
     const utterance = new SpeechSynthesisUtterance(selectedText);
-    utterance.rate = 0.95;
+    utterance.rate    = 0.95;
     utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
+    utterance.onend   = () => setIsSpeaking(false);
     utterance.onerror = () => setIsSpeaking(false);
     window.speechSynthesis.speak(utterance);
   };
 
-  // ── Delete document ────────────────────────────────────────────────────────
+  // ── Delete ───────────────────────────────────────────────────────────────────
   const handleDelete = async () => {
     if (!window.confirm('Delete this document? This cannot be undone.')) return;
-
-    const headers = getFreshHeaders();
-    if (!isValidHeaders(headers)) { onAuthError(); return; }
-
+    const headers = guardedHeaders();
+    if (!headers) return;
     try {
-      const res = await fetch(`${apiUrl}/document/${documentId}`, {
-        method: 'DELETE',
-        headers,
-      });
+      const res = await fetch(`${apiUrl}/document/${documentId}`, { method: 'DELETE', headers });
       if (res.status === 401) { onAuthError(); return; }
       onBack();
     } catch (err) {
@@ -506,6 +423,7 @@ const Workspace = ({
 
   const dirtyCount = dirtyPages.size;
 
+  // ─────────────────────────────────────────────────────────────────────────────
   return (
     <div
       className="flex h-screen bg-[#F0F2F5] relative overflow-hidden font-sans"
@@ -517,53 +435,32 @@ const Workspace = ({
         <div
           className="floating-menu"
           style={{
-            position: 'fixed',
-            zIndex: 9999,
-            top: `${menuConfig.y}px`,
-            left: `${menuConfig.x}px`,
+            position: 'fixed', zIndex: 9999,
+            top: `${menuConfig.y}px`, left: `${menuConfig.x}px`,
             transform: 'translateX(-50%)',
-            background: '#1a1a1a',
-            color: '#fff',
-            borderRadius: '8px',
-            display: 'flex',
-            overflow: 'hidden',
-            boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
-            border: '1px solid #333',
+            background: '#1a1a1a', color: '#fff',
+            borderRadius: '8px', display: 'flex', overflow: 'hidden',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)', border: '1px solid #333',
           }}
           onMouseUp={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <div style={{ display: 'flex' }}>
-            {/* Single word → Meaning + Speak */}
             {menuConfig.type === 'word' && (
               <>
-                <button onClick={handleMeaningClick} style={menuBtnStyle}>
-                  📖 Meaning
-                </button>
+                <button onClick={handleMeaningClick} style={menuBtnStyle}>📖 Meaning</button>
                 <div style={{ width: 1, background: '#333' }} />
-                <button onClick={handleTTS} style={menuBtnStyle}>
-                  {isSpeaking ? '⏹ Stop' : '🔊 Speak'}
-                </button>
+                <button onClick={handleTTS} style={menuBtnStyle}>{isSpeaking ? '⏹ Stop' : '🔊 Speak'}</button>
               </>
             )}
-
-            {/* Short phrase → Speak only */}
             {menuConfig.type === 'short' && (
-              <button onClick={handleTTS} style={menuBtnStyle}>
-                {isSpeaking ? '⏹ Stop' : '🔊 Speak'}
-              </button>
+              <button onClick={handleTTS} style={menuBtnStyle}>{isSpeaking ? '⏹ Stop' : '🔊 Speak'}</button>
             )}
-
-            {/* Long paragraph → Summarize + Read */}
             {menuConfig.type === 'paragraph' && (
               <>
-                <button onClick={handleSummaryClick} style={menuBtnStyle}>
-                  ✨ Summarize
-                </button>
+                <button onClick={handleSummaryClick} style={menuBtnStyle}>✨ Summarize</button>
                 <div style={{ width: 1, background: '#333' }} />
-                <button onClick={handleTTS} style={menuBtnStyle}>
-                  {isSpeaking ? '⏹ Stop' : '🔊 Read'}
-                </button>
+                <button onClick={handleTTS} style={menuBtnStyle}>{isSpeaking ? '⏹ Stop' : '🔊 Read'}</button>
               </>
             )}
           </div>
@@ -572,13 +469,7 @@ const Workspace = ({
 
       {/* ── SIDEBAR ── */}
       <aside className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-6 shrink-0 z-20">
-
-        {/* Back */}
-        <button
-          onClick={onBack}
-          className="p-3 mb-4 text-gray-500 hover:bg-gray-100 hover:text-gray-900 rounded-xl transition-all"
-          title="Back to Dashboard"
-        >
+        <button onClick={onBack} className="p-3 mb-4 text-gray-500 hover:bg-gray-100 hover:text-gray-900 rounded-xl transition-all" title="Back to Dashboard">
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
@@ -586,143 +477,106 @@ const Workspace = ({
 
         <div className="w-8 h-px bg-gray-200 my-2" />
 
-        {/* Bulk save — scanned docs only */}
         {!isTextDoc && (
-          <div className="relative">
+          <>
+            {/* Bulk save */}
+            <div className="relative">
+              <button
+                onClick={handleBulkSave}
+                disabled={isBulkSaving || dirtyCount === 0}
+                className={`p-3 rounded-xl transition-all ${dirtyCount > 0 ? 'text-blue-500 hover:bg-blue-50' : 'text-gray-300 cursor-default'} disabled:opacity-50`}
+                title={dirtyCount > 0 ? `Save all ${dirtyCount} unsaved page(s)` : 'No unsaved changes'}
+              >
+                {isBulkSaving ? (
+                  <Spinner size="w-5 h-5" color="border-t-blue-500" />
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                  </svg>
+                )}
+              </button>
+              {dirtyCount > 0 && !isBulkSaving && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                  {dirtyCount}
+                </span>
+              )}
+            </div>
+
+            {/* Rebuild PDF */}
             <button
-              onClick={handleBulkSave}
-              disabled={isBulkSaving || dirtyCount === 0}
-              className={`p-3 rounded-xl transition-all ${
-                dirtyCount > 0
-                  ? 'text-blue-500 hover:bg-blue-50'
-                  : 'text-gray-300 cursor-default'
-              } disabled:opacity-50`}
-              title={dirtyCount > 0 ? `Save all ${dirtyCount} unsaved page(s)` : 'No unsaved changes'}
+              onClick={handleGeneratePdf}
+              disabled={isGeneratingPdf}
+              className="p-3 text-gray-400 hover:bg-blue-50 hover:text-blue-500 rounded-xl transition-all disabled:opacity-50"
+              title="Rebuild PDF from edited text"
             >
-              {isBulkSaving ? (
-                <div className="w-5 h-5 border-2 border-blue-300 border-t-blue-500 rounded-full animate-spin" />
+              {isGeneratingPdf ? (
+                <Spinner size="w-5 h-5" color="border-t-blue-500" />
               ) : (
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                 </svg>
               )}
             </button>
-            {dirtyCount > 0 && !isBulkSaving && (
-              <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
-                {dirtyCount}
-              </span>
-            )}
-          </div>
+          </>
         )}
 
-        {/* Rebuild PDF — scanned docs only */}
-        {!isTextDoc && (
-          <button
-            onClick={handleGeneratePdf}
-            disabled={isGeneratingPdf}
-            className="p-3 text-gray-400 hover:bg-blue-50 hover:text-blue-500 rounded-xl transition-all disabled:opacity-50"
-            title="Rebuild PDF from edited text"
-          >
-            {isGeneratingPdf ? (
-              <div className="w-5 h-5 border-2 border-blue-300 border-t-blue-500 rounded-full animate-spin" />
-            ) : (
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-              </svg>
-            )}
-          </button>
-        )}
-
-        {/* Delete */}
-        <button
-          onClick={handleDelete}
-          className="p-3 mt-auto text-gray-400 hover:bg-red-50 hover:text-red-500 rounded-xl transition-all"
-          title="Delete document"
-        >
+        <button onClick={handleDelete} className="p-3 mt-auto text-gray-400 hover:bg-red-50 hover:text-red-500 rounded-xl transition-all" title="Delete document">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
           </svg>
         </button>
       </aside>
 
-      {/* ── MAIN LAYOUT ── */}
+      {/* ── MAIN ── */}
       <main className="flex-1 flex flex-col h-screen relative">
 
-        {/* TOP BAR */}
+        {/* Top bar */}
         <header className="absolute top-0 left-0 right-0 z-10 px-8 py-4 pointer-events-none flex justify-between items-center">
           <div className="flex items-center gap-2 pointer-events-auto">
-            {documentCategory && (
+            {(docMeta?.filename || documentCategory) && (
               <div className="bg-white/90 backdrop-blur-sm border border-gray-200 shadow-sm px-3 py-1.5 rounded-full">
                 <span className="text-xs font-medium text-gray-500">
-                  {documentCategory === 'text' ? '📄 Digital document' : '🔍 Scanned document'}
+                  {documentCategory === 'text' ? '📄' : '🔍'}{' '}
+                  {docMeta?.filename || (documentCategory === 'text' ? 'Digital document' : 'Scanned document')}
                 </span>
               </div>
             )}
-            {docMeta && docMeta.processing_status && docMeta.processing_status !== 'completed' && (
+            {docMeta?.processing_status && docMeta.processing_status !== 'completed' && (
               <div className="bg-amber-50 border border-amber-200 shadow-sm px-3 py-1.5 rounded-full">
-                <span className="text-xs font-medium text-amber-600 capitalize">
-                  {docMeta.processing_status}
-                </span>
+                <span className="text-xs font-medium text-amber-600 capitalize">{docMeta.processing_status}</span>
               </div>
             )}
           </div>
 
+          {/* Page counter + streaming indicator */}
           <div className="bg-white/90 backdrop-blur-sm border border-gray-200 shadow-sm px-4 py-1.5 rounded-full pointer-events-auto flex items-center gap-3 ml-auto">
             {!isTextDoc && (
-              <span className="text-xs font-medium text-gray-600">
-                Page {currentPage} of {totalPages}
-              </span>
+              <span className="text-xs font-medium text-gray-600">Page {currentPage} of {totalPages}</span>
             )}
             {streamingPage && (
-              <span className="text-xs text-blue-500 font-medium">
-                Streaming p.{streamingPage}…
-              </span>
+              <span className="text-xs text-blue-500 font-medium">Streaming p.{streamingPage}…</span>
             )}
             {isLoadingMore && !streamingPage && (
-              <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              <Spinner size="w-3 h-3" color="border-t-blue-500" />
             )}
           </div>
         </header>
 
-        {/* BULK SAVE STATUS TOAST */}
-        {bulkSaveStatus && (
-          <div
-            className={`absolute top-16 left-1/2 -translate-x-1/2 z-20 px-4 py-2 rounded-full text-xs font-medium shadow-lg ${
-              bulkSaveStatus === 'success'
-                ? 'bg-green-100 border border-green-200 text-green-700'
-                : 'bg-red-100 border border-red-200 text-red-700'
-            }`}
-          >
-            {bulkSaveStatus === 'success' ? '✓ All changes saved' : '✕ Save failed — try again'}
-          </div>
-        )}
+        {/* Toasts */}
+        <Toast
+          status={bulkSaveStatus}
+          message={bulkSaveStatus === 'success' ? 'All changes saved' : 'Save failed — try again'}
+        />
+        <Toast status={pdfGenStatus} message={pdfGenMessage} />
 
-        {/* PDF GEN STATUS TOAST */}
-        {pdfGenStatus && (
-          <div
-            className={`absolute top-16 left-1/2 -translate-x-1/2 z-20 px-4 py-2 rounded-full text-xs font-medium shadow-lg ${
-              pdfGenStatus === 'success'
-                ? 'bg-green-100 border border-green-200 text-green-700'
-                : 'bg-red-100 border border-red-200 text-red-700'
-            }`}
-          >
-            {pdfGenStatus === 'success' ? '✓' : '✕'} {pdfGenMessage}
-          </div>
-        )}
-
-        {/* ── SCROLLABLE CONTENT AREA ── */}
-        <div
-          ref={scrollRef}
-          className="flex-1 overflow-y-auto overflow-x-hidden pt-16 pb-20 scroll-smooth"
-        >
+        {/* Scrollable content */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden pt-16 pb-20 scroll-smooth">
           {isTextDoc ? (
             pdfUrl ? (
               <PdfViewer pdfUrl={pdfUrl} />
             ) : (
               <div className="flex items-center justify-center h-full">
-                <div className="w-8 h-8 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
+                <Spinner size="w-8 h-8" color="border-t-gray-600" />
               </div>
             )
           ) : (
@@ -737,8 +591,8 @@ const Workspace = ({
                   )}
                   <div className="bg-white w-[210mm] min-h-[297mm] shadow-sm hover:shadow-md transition-shadow duration-300 border border-gray-200/60 mx-auto relative">
                     <div
-                      contentEditable="true"
-                      suppressContentEditableWarning={true}
+                      contentEditable
+                      suppressContentEditableWarning
                       className="w-full h-full p-[25mm] outline-none text-[12pt] leading-[1.8] text-gray-800 font-serif text-justify selection:bg-blue-100 selection:text-blue-900 whitespace-pre-wrap empty:before:content-['Start_typing...'] empty:before:text-gray-300"
                       onBlur={(e) => handleContentChange(page.page_number, e.currentTarget.innerText)}
                     >
@@ -754,6 +608,7 @@ const Workspace = ({
                 </div>
               ))}
 
+              {/* Loading skeleton for next page */}
               {isLoadingMore && (
                 <div className="bg-white w-[210mm] h-[297mm] shadow-sm border border-gray-200 mx-auto p-[25mm] space-y-6 animate-pulse">
                   <div className="h-4 bg-gray-100 rounded w-full" />
@@ -764,13 +619,7 @@ const Workspace = ({
                 </div>
               )}
 
-              {!hasMore && pages.length > 0 && (
-                <div className="text-center py-8">
-                  <span className="bg-gray-200 text-gray-600 text-xs px-3 py-1 rounded-full font-medium">
-                    End of Document
-                  </span>
-                </div>
-              )}
+              {!hasMore && pages.length > 0 && <EndOfDocument />}
 
               <div ref={bottomRef} className="h-4" />
             </div>
@@ -778,7 +627,7 @@ const Workspace = ({
         </div>
       </main>
 
-      {/* ── SUMMARY / MEANING DRAWER ── */}
+      {/* ── MEANING / SUMMARY DRAWER ── */}
       <div
         className={`workspace-drawer fixed top-0 right-0 h-full w-[450px] bg-white shadow-2xl border-l border-gray-100 z-[200] transition-transform duration-500 flex flex-col ${
           isDrawerOpen ? 'translate-x-0' : 'translate-x-full'
@@ -791,10 +640,7 @@ const Workspace = ({
               {drawerContent.type === 'summary' ? 'AI Summary' : 'Definition'}
             </h2>
           </div>
-          <button
-            onClick={() => setIsDrawerOpen(false)}
-            className="text-gray-400 hover:text-gray-900 transition-colors p-2 hover:bg-gray-100 rounded-full"
-          >
+          <button onClick={() => setIsDrawerOpen(false)} className="text-gray-400 hover:text-gray-900 transition-colors p-2 hover:bg-gray-100 rounded-full">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
@@ -817,31 +663,13 @@ const Workspace = ({
                 <div className="h-4 bg-blue-100 rounded w-4/6" />
               </div>
             ) : (
-              <p className="text-base text-gray-800 leading-relaxed font-medium">
-                {drawerContent.result}
-              </p>
+              <p className="text-base text-gray-800 leading-relaxed font-medium">{drawerContent.result}</p>
             )}
           </div>
         </div>
       </div>
     </div>
   );
-};
-
-// Inline style for floating menu buttons
-const menuBtnStyle = {
-  background: 'none',
-  border: 'none',
-  color: '#fff',
-  padding: '8px 14px',
-  fontSize: '12px',
-  fontWeight: '600',
-  cursor: 'pointer',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '5px',
-  whiteSpace: 'nowrap',
-  fontFamily: 'inherit',
 };
 
 export default Workspace;

@@ -101,6 +101,18 @@ const Workspace = ({
     return h;
   }, [onAuthError]);
 
+const saveNote = useCallback(async (pageNum, text) => {
+  const headers = guardedHeaders();
+  if (!headers) return;
+  const res = await fetch(`${BASE}/documents/${documentId}/pages/${pageNum}/note`, {
+    method: 'PUT',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note_text: text }),
+  });
+  if (res.status === 401) { onAuthError(); throw new Error('Unauthorized'); }
+  if (!res.ok) throw new Error('Failed to save note');
+}, [BASE, documentId, guardedHeaders, onAuthError]);
+
   // ── Document metadata ──────────────────────────────────────────────────────
   const fetchDocumentMeta = useCallback(async () => {
     const headers = guardedHeaders();
@@ -118,6 +130,24 @@ const Workspace = ({
   }, [documentId, BASE, guardedHeaders, onAuthError]);
 
   useEffect(() => { fetchDocumentMeta(); }, []);
+
+  useEffect(() => {
+  const loadNotes = async () => {
+    const headers = guardedHeaders();
+    if (!headers) return;
+    try {
+      const res = await fetch(`${BASE}/documents/${documentId}/notes`, { headers });
+      if (!res.ok) return;
+      const data = await res.json();
+      const map = {};
+      (data.notes || []).forEach(n => { map[n.page_number] = n.note_text; });
+      setPageNotes(map);
+    } catch (err) {
+      console.error('Failed to load notes:', err);
+    }
+  };
+  loadNotes();
+}, [documentId]);
 
   useEffect(() => {
     if (isTextDoc) {
@@ -872,6 +902,7 @@ const Workspace = ({
                     openNotePageNum={openNotePageNum}
                     onToggleNote={toggleNoteSection}
                     onPageChange={(pageNum) => setCurrentPage(pageNum)}
+                    onNoteSave={saveNote}
                   />
                 </>
               ) : (
@@ -931,6 +962,7 @@ const Workspace = ({
                       onChange={(val) => handleNoteChange(page.page_number, val)}
                       isOpen={openNotePageNum === page.page_number}
                       onClose={() => toggleNoteSection(page.page_number)}
+                      onSave={saveNote}
                     />
                   </div>
                 ))}

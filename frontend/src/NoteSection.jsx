@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // NoteSection.jsx
 // ─────────────────────────────────────────────────────────────────────────────
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 
 const PencilIcon = ({ size = 13, color = 'currentColor' }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -38,26 +38,96 @@ export const CenteredNoteButton = ({ hasNote, isOpen, onClick, pageNum }) => (
   </button>
 );
 
-export const FloatingNotePanel = ({ pageNum, note, onChange, isOpen, onClose }) => {
-  const textareaRef = useRef(null);
-  const [charCount, setCharCount] = useState(note?.length ?? 0);
+// saveStatus: '' | 'saving' | 'saved' | 'error'
+const SaveIndicator = ({ status }) => {
+  if (!status) return null;
+  const map = {
+    saving: { text: 'Saving…',  cls: 'text-gray-400' },
+    saved:  { text: 'Saved ✓',  cls: 'text-green-500' },
+    error:  { text: 'Save failed', cls: 'text-red-500' },
+  };
+  const { text, cls } = map[status] || {};
+  return <span className={`text-[11px] font-medium ${cls}`}>{text}</span>;
+};
+
+export const FloatingNotePanel = ({
+  pageNum,
+  note,
+  onChange,
+  isOpen,
+  onClose,
+  // NEW — called with (pageNum, text) to persist; called with (pageNum, '') to delete
+  onSave,
+}) => {
+  const textareaRef  = useRef(null);
+  const debounceRef  = useRef(null);
+  const [charCount,   setCharCount]   = useState(note?.length ?? 0);
+  const [saveStatus,  setSaveStatus]  = useState('');
+
+  // keep charCount in sync when note prop changes from outside (initial load)
+  useEffect(() => { setCharCount(note?.length ?? 0); }, [note]);
 
   useEffect(() => {
-    if (isOpen && textareaRef.current) {
-      textareaRef.current.focus();
-    }
+    if (isOpen && textareaRef.current) textareaRef.current.focus();
   }, [isOpen]);
 
+  // clear "saved" indicator after 2 s
+  useEffect(() => {
+    if (saveStatus !== 'saved') return;
+    const id = setTimeout(() => setSaveStatus(''), 2000);
+    return () => clearTimeout(id);
+  }, [saveStatus]);
+
+  const triggerSave = useCallback(async (text) => {
+    if (!onSave) return;
+    setSaveStatus('saving');
+    try {
+      await onSave(pageNum, text);
+      setSaveStatus('saved');
+    } catch {
+      setSaveStatus('error');
+    }
+  }, [onSave, pageNum]);
+
   const handleChange = (e) => {
-    onChange(e.target.value);
-    setCharCount(e.target.value.length);
+    const val = e.target.value;
+    onChange(val);
+    setCharCount(val.length);
+
+    // debounced auto-save: 1.2 s after user stops typing
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => triggerSave(val), 1200);
   };
 
-  const handleClear = () => {
+  const handleBlur = () => {
+    clearTimeout(debounceRef.current);
+    triggerSave(textareaRef.current?.value ?? note);
+  };
+
+  const handleClear = async () => {
+    clearTimeout(debounceRef.current);
     onChange('');
     setCharCount(0);
     textareaRef.current?.focus();
+    if (onSave) {
+      setSaveStatus('saving');
+      try {
+        await onSave(pageNum, '');
+        setSaveStatus('saved');
+      } catch {
+        setSaveStatus('error');
+      }
+    }
   };
+
+  const handleDone = () => {
+    clearTimeout(debounceRef.current);
+    triggerSave(textareaRef.current?.value ?? note);
+    onClose();
+  };
+
+  // cleanup debounce on unmount
+  useEffect(() => () => clearTimeout(debounceRef.current), []);
 
   if (!isOpen) return null;
 
@@ -84,21 +154,21 @@ export const FloatingNotePanel = ({ pageNum, note, onChange, isOpen, onClose }) 
       </div>
 
       <div className="px-4 py-3">
-        <div className="relative">
-          <textarea
-            ref={textareaRef}
-            value={note}
-            onChange={handleChange}
-            placeholder="Write a note for this page…"
-            className="w-full min-h-[120px] resize-y outline-none rounded-xl p-3 text-[13px] leading-relaxed text-gray-800 bg-gray-50/50 border-[1.5px] border-gray-200 box-border transition-all duration-150 focus:border-blue-400 focus:bg-white focus:shadow-[0_0_0_3px_rgba(59,130,246,0.08)]"
-          />
-        </div>
+        <textarea
+          ref={textareaRef}
+          value={note}
+          onChange={handleChange}
+          onBlur={handleBlur}
+          placeholder="Write a note for this page…"
+          className="w-full min-h-[120px] resize-y outline-none rounded-xl p-3 text-[13px] leading-relaxed text-gray-800 bg-gray-50/50 border-[1.5px] border-gray-200 box-border transition-all duration-150 focus:border-blue-400 focus:bg-white focus:shadow-[0_0_0_3px_rgba(59,130,246,0.08)]"
+        />
       </div>
 
       <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50/50">
-        <span className="text-[11px] text-gray-400 font-medium">
-          {charCount} chars
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="text-[11px] text-gray-400 font-medium">{charCount} chars</span>
+          <SaveIndicator status={saveStatus} />
+        </div>
         <div className="flex items-center gap-2">
           {note && (
             <button
@@ -109,7 +179,7 @@ export const FloatingNotePanel = ({ pageNum, note, onChange, isOpen, onClose }) 
             </button>
           )}
           <button
-            onClick={onClose}
+            onClick={handleDone}
             className="text-[12px] px-4 py-1.5 rounded-lg bg-gray-900 text-white hover:bg-gray-800 transition-colors font-medium shadow-sm"
           >
             Done
@@ -120,8 +190,6 @@ export const FloatingNotePanel = ({ pageNum, note, onChange, isOpen, onClose }) 
   );
 };
 
-// Backward compat aliases
 export const NoteButton = CenteredNoteButton;
 export const InlineNoteSection = FloatingNotePanel;
-
 export default CenteredNoteButton;

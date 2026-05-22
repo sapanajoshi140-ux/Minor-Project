@@ -19,6 +19,7 @@ const PdfPage = ({
   onNoteChange,
   isNoteOpen,
   onToggleNote,
+  onNoteSave,
 }) => {
   const canvasRef     = useRef(null);
   const textLayerRef  = useRef(null);
@@ -157,6 +158,7 @@ const PdfPage = ({
         onChange={(val) => onNoteChange(pageNum, val)}
         isOpen={isNoteOpen}
         onClose={() => onToggleNote(pageNum)}
+        onSave={onNoteSave} 
       />
     </div>
   );
@@ -170,6 +172,7 @@ const PdfViewer = ({
   onNoteChange,
   openNotePageNum,
   onToggleNote,
+  onNoteSave,
 }) => {
   const [ready,       setReady]       = useState(false);
   const [error,       setError]       = useState(null);
@@ -259,6 +262,7 @@ const PdfViewer = ({
               onNoteChange={onNoteChange}
               isNoteOpen={openNotePageNum === pageNum}
               onToggleNote={onToggleNote}
+              onNoteSave={onNoteSave} 
             />
           ))}
           <EndOfDocument />
@@ -290,20 +294,7 @@ const PdfViewer = ({
           ))}
         </div>
 
-        {totalPages <= 20 && (
-          <div className="flex flex-col items-center gap-1.5 pointer-events-auto">
-            {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
-              <button
-                key={p}
-                onClick={() => scrollToPage(p)}
-                title={`Page ${p}`}
-                className={`rounded-full transition-all duration-200 ${
-                  p === currentPage ? 'w-2 h-2 bg-gray-600' : 'w-1.5 h-1.5 bg-gray-300 hover:bg-gray-400'
-                }`}
-              />
-            ))}
-          </div>
-        )}
+       
       </div>
     </div>
   );

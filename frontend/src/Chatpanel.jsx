@@ -162,7 +162,9 @@ const ChatPanel = ({
   documentName,
   injectedMessage,
   onInjectedMessageConsumed,
+  panelWidth = 380, 
 }) => {
+  const maxTextareaHeight = Math.max(96, Math.round(panelWidth * 0.25));
   const [messages,    setMessages]    = useState([]);
   const [input,       setInput]       = useState('');
   const [sessionId,   setSessionId]   = useState(null);
@@ -322,10 +324,8 @@ const ChatPanel = ({
     setError('');
   };
 
-  // ── render ────────────────────────────────────────────────────────────────
   return (
-    <div className="w-[380px] h-full flex flex-col bg-white border-l border-gray-100 shadow-xl">
-
+  <div style={{ height: '100vh' }} className="w-full flex flex-col bg-white border-l border-gray-100 shadow-xl">
       {/* header */}
       <div className="shrink-0 px-5 py-4 border-b border-gray-100 flex items-center gap-3 bg-gradient-to-r from-blue-50 to-indigo-50">
         <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shrink-0">
@@ -427,23 +427,23 @@ const ChatPanel = ({
       {/* input */}
       <div className="shrink-0 p-4 border-t border-gray-100 bg-white">
         <div className="flex items-end gap-2 bg-gray-50 border border-gray-200 rounded-2xl px-3 py-2 focus-within:border-blue-300 focus-within:bg-white transition">
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onFocus={() => setInputFocused(true)}
-            onBlur={() => setInputFocused(false)}
-            placeholder={animatedPlaceholder}
-            disabled={isStreaming}
-            className="flex-1 bg-transparent text-sm text-gray-800 placeholder-gray-400 outline-none resize-none max-h-24 leading-relaxed disabled:opacity-60"
-            style={{ minHeight: '24px' }}
-            onInput={e => {
-              e.target.style.height = 'auto';
-              e.target.style.height = `${Math.min(e.target.scrollHeight, 96)}px`;
-            }}
-          />
+         < textarea
+  ref={inputRef}
+  rows={1}
+  value={input}
+  onChange={e => setInput(e.target.value)}
+  onKeyDown={handleKeyDown}
+  onFocus={() => setInputFocused(true)}
+  onBlur={() => setInputFocused(false)}
+  placeholder={animatedPlaceholder}
+  disabled={isStreaming}
+  className="flex-1 bg-transparent text-sm text-gray-800 placeholder-gray-400 outline-none resize-none leading-relaxed disabled:opacity-60"
+  style={{ minHeight: '24px', maxHeight: `${maxTextareaHeight}px` }}  // ← dynamic max height
+  onInput={e => {
+    e.target.style.height = 'auto';
+    e.target.style.height = `${Math.min(e.target.scrollHeight, maxTextareaHeight)}px`; // ← use dynamic value
+  }}
+/>
           <button
             onClick={sendMessage}
             disabled={!input.trim() || isStreaming}

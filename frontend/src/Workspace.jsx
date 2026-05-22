@@ -1,6 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// Workspace.jsx  (fully unified — centered floating note panel for ALL docs)
-// ─────────────────────────────────────────────────────────────────────────────
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import PdfViewer   from './PdfViewer';
 import ChatPanel   from './ChatPanel';
@@ -93,7 +91,8 @@ const Workspace = ({
 
   const isTextDoc = documentCategory === 'text';
   const hasMore   = currentPage < totalPages;
-
+  const [chatWidth, setChatWidth] = useState(380);
+  const isResizing = useRef(false);
   // ── Auth guard ─────────────────────────────────────────────────────────────
   const guardedHeaders = useCallback(() => {
     const h = getFreshHeaders();
@@ -996,18 +995,49 @@ const saveNote = useCallback(async (pageNum, text) => {
           </div>
         </div>
 
-        {/* ── CHAT PANEL ── */}
-        <div className="chat-panel shrink-0">
-          <ChatPanel
-            documentId={documentId}
-            documentName={docMeta?.filename || documentName || ''}
-            injectedMessage={injectedMessage}
-            onInjectedMessageConsumed={() => setInjectedMessage(null)}
-          />
-        </div>
-      </main>
-    </div>
+ <div
+  style={{ width: chatWidth, minWidth: 260, maxWidth: 600 }}
+  className="chat-panel shrink-0 relative flex self-stretch"
+>
+  {/* Drag handle */}
+  <div
+    className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-30 group"
+    style={{ marginLeft: -2 }}
+    onMouseDown={(e) => {
+      e.preventDefault();
+      isResizing.current = true;
+      const startX = e.clientX;
+      const startW = chatWidth;
+
+      const onMove = (ev) => {
+        if (!isResizing.current) return;
+        const delta = startX - ev.clientX; // dragging left = wider
+        setChatWidth(Math.min(600, Math.max(260, startW + delta)));
+      };
+      const onUp = () => {
+        isResizing.current = false;
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    }}
+  >
+    <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-transparent group-hover:bg-blue-300 transition-colors" />
+  </div>
+
+  <ChatPanel
+    documentId={documentId}
+    documentName={docMeta?.filename || documentName || ''}
+    injectedMessage={injectedMessage}
+    onInjectedMessageConsumed={() => setInjectedMessage(null)}
+    panelWidth={chatWidth}
+  />
+</div>
+</main>      
+</div>
   );
 };
+
 
 export default Workspace;

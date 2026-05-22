@@ -52,6 +52,7 @@ GET    /health                                     — Health check
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re as _re
@@ -59,6 +60,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
+from itertools import zip_longest
 from pathlib import Path
 from typing import List, Optional
 
@@ -120,6 +122,7 @@ from schemas import (
     DocumentEditResponse,
     DocumentResponse,
     DocumentViewResponse,
+    FormattingSummary,
     GeneratePdfResponse,
     OcrLine,
     PageResponse,
@@ -128,6 +131,10 @@ from schemas import (
     PaginatedPagesResponse,
     StorageUsageResponse,
     DocumentListResponse,
+    # formatting
+    FormattingStatusResponse,
+    PageFormattingEntry,
+    ReformatResponse,
     # dashboard
     ReadingSessionStartRequest,
     ReadingSessionStartResponse,
@@ -216,8 +223,33 @@ async def lifespan(app: FastAPI):
     logger.info("Dictionary table initialised.")
     _scheduler.add_job(_cleanup_revoked_tokens, "interval", hours=24, id="cleanup_revoked")
     _scheduler.start()
+
+    # ── Start the OCR Ollama formatting background worker ─────────────────────
+    # The worker drains the in-process FORMAT_QUEUE that upload.py populates.
+    # It runs for the entire lifetime of the server and is cancelled on shutdown.
+    _fmt_task = None
+    try:
+        from services.ocr_formatter import run_formatting_worker
+        _fmt_task = asyncio.create_task(run_formatting_worker(), name="ocr_formatter")
+        logger.info("OCR formatting worker task created.")
+    except Exception as exc:
+        logger.warning(
+            f"OCR formatting worker could not start: {exc}. "
+            f"Uploaded documents will display raw OCR text only."
+        )
+
     logger.info("Startup complete — scheduler running.")
     yield
+
+    # ── Graceful shutdown ─────────────────────────────────────────────────────
+    if _fmt_task and not _fmt_task.done():
+        _fmt_task.cancel()
+        try:
+            await _fmt_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("OCR formatting worker stopped.")
+
     _scheduler.shutdown(wait=False)
     logger.info("Shutdown complete.")
 
@@ -599,7 +631,16 @@ def get_page(
     )
     if not page:
         raise HTTPException(status_code=404, detail="Page not found.")
-    return PageResponse.model_validate(page)
+
+    # Compute display_text: prefer formatted_text when formatting is complete.
+    display = (
+        page.formatted_text
+        if page.formatting_status == "completed" and page.formatted_text
+        else page.extracted_text
+    )
+    response = PageResponse.model_validate(page)
+    response.display_text = display
+    return response
 
 
 # ── Paginated OCR pages ───────────────────────────────────────────────────────
@@ -638,12 +679,23 @@ def get_pages(
         .limit(limit)
         .all()
     )
+
+    def _to_page_response(p) -> PageResponse:
+        display = (
+            p.formatted_text
+            if p.formatting_status == "completed" and p.formatted_text
+            else p.extracted_text
+        )
+        r = PageResponse.model_validate(p)
+        r.display_text = display
+        return r
+
     return PaginatedPagesResponse(
         document_id=document_id,
         total_pages=doc.total_pages or 0,
         page=page,
         limit=limit,
-        pages=[PageResponse.model_validate(p) for p in pages],
+        pages=[_to_page_response(p) for p in pages],
     )
 
 
@@ -680,8 +732,13 @@ def stream_lines(
         raise HTTPException(status_code=404, detail="Page not found.")
 
     def _generate():
-        text = page.extracted_text or ""
-        for line_num, line in enumerate(text.split("\n"), start=1):
+        # Use formatted_text when available for better line quality.
+        display_text = (
+            page.formatted_text
+            if page.formatting_status == "completed" and page.formatted_text
+            else page.extracted_text
+        ) or ""
+        for line_num, line in enumerate(display_text.split("\n"), start=1):
             if line.strip():
                 yield json.dumps({
                     "page_number":      page_number,
@@ -689,6 +746,7 @@ def stream_lines(
                     "text":             line,
                     "ocr_type":         page.ocr_type,
                     "confidence_score": page.confidence_score,
+                    "formatting_status": page.formatting_status,
                 }) + "\n"
 
     return StreamingResponse(_generate(), media_type="application/x-ndjson")
@@ -875,16 +933,57 @@ def view_document(
         .all()
     )
 
+    # ── Build formatting summary for UX status banner ─────────────────────────
+    status_counts: dict[str, int] = {
+        "pending": 0, "processing": 0, "completed": 0,
+        "failed": 0, "skipped": 0,
+    }
+    for pg in pages:
+        key = pg.formatting_status or "pending"
+        status_counts[key] = status_counts.get(key, 0) + 1
+
+    total_pg = len(pages)
+    all_done = total_pg > 0 and status_counts["pending"] == 0 and status_counts["processing"] == 0
+
+    fmt_summary = FormattingSummary(
+        total_pages=total_pg,
+        pending=status_counts["pending"],
+        processing=status_counts["processing"],
+        completed=status_counts["completed"],
+        failed=status_counts["failed"],
+        skipped=status_counts["skipped"],
+        all_done=all_done,
+    )
+
+    # ── Build OcrLine list, preferring formatted_text when ready ─────────────
     ocr_lines: list[OcrLine] = []
     for page in pages:
-        for line_num, line in enumerate((page.extracted_text or "").split("\n"), start=1):
-            if line.strip():
+        # display_text: formatted_text when complete, else raw OCR text.
+        display_text = (
+            page.formatted_text
+            if page.formatting_status == "completed" and page.formatted_text
+            else page.extracted_text
+        ) or ""
+
+        raw_text = page.extracted_text or ""
+
+        for line_num, (disp_line, raw_line) in enumerate(
+            zip_longest(
+                display_text.split("\n"),
+                raw_text.split("\n"),
+                fillvalue="",
+            ),
+            start=1,
+        ):
+            if disp_line.strip():
                 ocr_lines.append(OcrLine(
                     page_number=page.page_number,
                     line_number=line_num,
-                    text=line,
+                    text=disp_line,
+                    raw_text=raw_line if raw_line != disp_line else None,
                     ocr_type=page.ocr_type,
                     confidence_score=page.confidence_score,
+                    formatting_status=page.formatting_status,
                 ))
 
     return DocumentViewResponse(
@@ -894,6 +993,7 @@ def view_document(
         total_pages=doc.total_pages,
         pdf_url=None,
         ocr_lines=ocr_lines,
+        formatting_summary=fmt_summary,
     )
 
 
@@ -991,6 +1091,115 @@ def download_pdf(
             "Cache-Control": "private, max-age=3600",
         },
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OCR FORMATTING ROUTES
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── Formatting status ─────────────────────────────────────────────────────────
+
+@app.get(
+    "/document/{document_id}/formatting-status",
+    response_model=FormattingStatusResponse,
+    tags=["Documents"],
+    summary="Get Ollama formatting progress for all pages of a document",
+    description=(
+        "Poll this endpoint every 3–5 seconds while "
+        "summary.all_done is False.  Once all_done is True, "
+        "refresh GET /documents/{id}/view to display formatted text.\n\n"
+        "Page formatting_status values:\n"
+        "- **pending**    — queued, not yet started\n"
+        "- **processing** — Ollama call in flight\n"
+        "- **completed**  — formatted_text available\n"
+        "- **failed**     — retries exhausted; workspace shows raw OCR text\n"
+        "- **skipped**    — digital page; no formatting needed"
+    ),
+)
+@limiter.limit("60/minute")
+def get_formatting_status(
+    request: Request,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _get_owned_document(document_id, db, current_user)  # ownership guard
+
+    pages = (
+        db.query(DocumentPage)
+        .filter(DocumentPage.document_id == document_id)
+        .order_by(DocumentPage.page_number)
+        .all()
+    )
+
+    status_counts: dict[str, int] = {
+        "pending": 0, "processing": 0, "completed": 0,
+        "failed": 0, "skipped": 0,
+    }
+    page_entries: list[PageFormattingEntry] = []
+
+    for pg in pages:
+        key = pg.formatting_status or "pending"
+        status_counts[key] = status_counts.get(key, 0) + 1
+        page_entries.append(PageFormattingEntry.model_validate(pg))
+
+    total = len(pages)
+    all_done = total > 0 and status_counts["pending"] == 0 and status_counts["processing"] == 0
+
+    return FormattingStatusResponse(
+        document_id=document_id,
+        summary=FormattingSummary(
+            total_pages=total,
+            pending=status_counts["pending"],
+            processing=status_counts["processing"],
+            completed=status_counts["completed"],
+            failed=status_counts["failed"],
+            skipped=status_counts["skipped"],
+            all_done=all_done,
+        ),
+        pages=page_entries,
+    )
+
+
+# ── Re-trigger formatting (retry failed / pending pages) ─────────────────────
+
+@app.post(
+    "/document/{document_id}/reformat",
+    response_model=ReformatResponse,
+    tags=["Documents"],
+    summary="Re-enqueue failed or pending pages for Ollama formatting",
+    description=(
+        "Resets all **failed** and **pending** pages back to pending and "
+        "pushes them onto the formatting queue.  Use when Ollama was "
+        "temporarily unavailable during the initial upload.\n\n"
+        "Returns immediately — formatting happens in the background.\n"
+        "Track progress via GET /document/{id}/formatting-status."
+    ),
+)
+@limiter.limit("5/minute")
+def reformat_document(
+    request: Request,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _get_owned_document(document_id, db, current_user)  # ownership guard
+
+    try:
+        from services.ocr_formatter import enqueue_pending_pages_for_document
+        count = enqueue_pending_pages_for_document(document_id)
+        logger.info(f"Reformat: {count} page(s) enqueued for document {document_id}.")
+        return ReformatResponse(
+            document_id=document_id,
+            pages_enqueued=count,
+            message=(
+                f"{count} page(s) enqueued for formatting. "
+                "Poll GET /document/{id}/formatting-status for progress."
+            ),
+        )
+    except Exception as exc:
+        logger.error(f"Reformat failed for {document_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Reformat request failed: {exc}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

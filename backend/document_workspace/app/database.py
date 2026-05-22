@@ -1,16 +1,22 @@
 """
 database.py — SQLAlchemy models and DB session factory.
 
-Schema changes (notes update)
-------------------------------
-New table:
-  - `page_notes` : stores one note per (user, document, page_number).
-                   Created/updated via PUT /documents/{id}/pages/{n}/note.
-                   Fetched in bulk via GET /documents/{id}/notes.
+Schema changes (OCR formatting update)
+---------------------------------------
+DocumentPage gains five new columns:
+  raw_ocr_text          : original OCR text as extracted (never overwritten).
+  formatted_text        : Ollama-improved version; NULL until formatting completes.
+  formatting_status     : "pending" | "processing" | "completed" | "failed" | "skipped"
+                          "skipped" is used for digital pages that need no formatting.
+  formatting_started_at : timestamp when the background worker picked up the page.
+  formatting_completed_at: timestamp when formatting finished (success or failure).
 
-Previous tables (unchanged):
-  - `reading_sessions`, `reading_goals`, `user_vocabulary`,
-    `users`, `documents`, `document_pages`, `revoked_tokens`
+Workspace rendering rule (enforced by the API layer, not here):
+  Use formatted_text if formatting_status == "completed" AND formatted_text IS NOT NULL.
+  Otherwise fall back to extracted_text (raw OCR) so the workspace is never blank.
+
+Previous changes (notes update):
+  - page_notes table added.
 """
 
 from datetime import datetime
@@ -100,12 +106,53 @@ class Document(Base):
 # ── DocumentPage table ────────────────────────────────────────────────────────
 
 class DocumentPage(Base):
+    """
+    One row per page of a processed document.
+
+    Text columns
+    ------------
+    extracted_text   : primary text column — always populated with the best
+                       available text so the workspace never shows blank.
+                       For digital pages this is the embedded PDF/DOCX text.
+                       For scanned pages this is the raw OCR output.
+
+    raw_ocr_text     : immutable copy of the text as produced by OCR.
+                       Only written once at ingest time; never overwritten.
+                       Allows the user to revert to the original if needed.
+
+    formatted_text   : Ollama-cleaned version written by the background
+                       formatter.  NULL until formatting_status=="completed".
+
+    Formatting status lifecycle
+    ---------------------------
+    "pending"    → page was just saved; background worker has not started yet.
+    "processing" → worker picked the page; Ollama call in flight.
+    "completed"  → formatted_text is populated and ready to display.
+    "failed"     → all retries exhausted; workspace falls back to extracted_text.
+    "skipped"    → digital page (ocr_type=="digital"); no formatting needed.
+    """
     __tablename__ = "document_pages"
 
     id               = Column(Integer,    primary_key=True, autoincrement=True)
     document_id      = Column(String(36), ForeignKey("documents.id", ondelete="CASCADE"))
     page_number      = Column(Integer,    nullable=False)
-    extracted_text   = Column(LONGTEXT)
+
+    # ── Text columns ──────────────────────────────────────────────────────────
+    extracted_text          = Column(LONGTEXT)          # raw OCR / digital text (primary)
+    raw_ocr_text            = Column(LONGTEXT)          # immutable original OCR copy
+    formatted_text          = Column(LONGTEXT)          # Ollama-formatted version (nullable)
+
+    # ── Formatting status ─────────────────────────────────────────────────────
+    formatting_status       = Column(
+        String(20),
+        nullable=False,
+        default="pending",
+        index=True,
+    )
+    formatting_started_at   = Column(DateTime, nullable=True)
+    formatting_completed_at = Column(DateTime, nullable=True)
+
+    # ── OCR metadata ──────────────────────────────────────────────────────────
     ocr_type         = Column(String(20))
     confidence_score = Column(Float)
     created_at       = Column(DateTime,   default=datetime.utcnow)
@@ -173,11 +220,6 @@ class PageNote(Base):
     """
     One row per (user, document, page_number).
     Uses an upsert pattern — each user gets exactly one note slot per page.
-
-    Powers:
-      - The per-page note textarea rendered below each page in the viewer.
-      - Notes are fetched in bulk when the document is opened and pre-populated
-        into the correct textarea for each page.
     """
     __tablename__ = "page_notes"
 
@@ -193,7 +235,6 @@ class PageNote(Base):
     document = relationship("Document", back_populates="page_notes")
 
     __table_args__ = (
-        # One note per (user × document × page) — the upsert target key.
         UniqueConstraint("user_id", "document_id", "page_number", name="uq_page_note"),
         Index("idx_pn_user_doc", "user_id", "document_id"),
     )

@@ -26,6 +26,10 @@ class User(Base):
     hashed_password    = Column(String(255))
     is_verified        = Column(Boolean,     default=False)
     is_google_user     = Column(Boolean,     default=False)
+    # True once a password has been set — False for OAuth-only accounts that
+    # have never created a local password.  Enables the frontend to decide
+    # whether to show "Change Password" or "Create Password".
+    has_password       = Column(Boolean,     default=False, nullable=False)
     # Storage quota tracking — max 100 MB per user (104_857_600 bytes)
     used_storage_bytes = Column(BigInteger,  default=0, nullable=False)
     created_at         = Column(DateTime,    default=datetime.utcnow)

@@ -29,3 +29,16 @@ class ResetPassword(BaseModel):
 # New schema for Resend Verification
 class ResendVerificationRequest(BaseModel):
     email: EmailStr
+
+class ChangePassword(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_new_password: str
+
+class CreatePassword(BaseModel):
+    """
+    Used by OAuth-only users who have never set a local password.
+    No current_password field — the Bearer token is the identity proof.
+    """
+    new_password: str
+    confirm_new_password: str

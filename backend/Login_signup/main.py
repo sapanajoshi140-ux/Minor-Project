@@ -15,7 +15,8 @@ from slowapi.errors import RateLimitExceeded
 from database import SessionLocal, User, RevokedToken
 from schemas import (
     Signup, Login, RefreshToken,
-    GoogleLogin, ForgotPassword, ResetPassword, ResendVerificationRequest
+    GoogleLogin, ForgotPassword, ResetPassword, ResendVerificationRequest,
+    ChangePassword, CreatePassword,
 )
 from auth import (
     hash_password, verify_password,
@@ -161,14 +162,36 @@ def get_current_user(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+# ---------- PASSWORD STRENGTH ----------
+def _check_password_strength(password: str) -> None:
+    """
+    Enforce a baseline password policy.  Raises HTTPException 400 on failure.
+    Rules: ≥8 chars, at least one uppercase, one lowercase, one digit.
+    """
+    import re
+    errors = []
+    if len(password) < 8:
+        errors.append("at least 8 characters")
+    if not re.search(r"[A-Z]", password):
+        errors.append("at least one uppercase letter")
+    if not re.search(r"[a-z]", password):
+        errors.append("at least one lowercase letter")
+    if not re.search(r"\d", password):
+        errors.append("at least one number")
+    if errors:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must contain " + ", ".join(errors) + ".",
+        )
+
+
 # ---------- SIGNUP ----------
 @app.post("/signup")
 @limiter.limit("5/minute")
 async def signup(request: Request, data: Signup, db: Session = Depends(get_db)):
     if data.password != data.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
-    if len(data.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    _check_password_strength(data.password)
 
     try:
         user = User(
@@ -177,6 +200,7 @@ async def signup(request: Request, data: Signup, db: Session = Depends(get_db)):
             hashed_password = hash_password(data.password),
             is_verified     = False,
             is_google_user  = False,
+            has_password    = True,
             created_at      = datetime.utcnow(),
         )
         db.add(user)
@@ -235,10 +259,11 @@ async def resend_verification(request: Request, data: ResendVerificationRequest,
 async def login(request: Request, data: Login, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
 
-    if not user or not verify_password(data.password, user.hashed_password):
+    if not user or not verify_password(data.password, user.hashed_password or ""):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if user.is_google_user:
-        raise HTTPException(status_code=400, detail="Use Google login")
+    # Block OAuth-only accounts (no password set) from using this endpoint
+    if user.is_google_user and not user.has_password:
+        raise HTTPException(status_code=400, detail="This account uses Google login. Use Google sign-in or create a password first.")
     if not user.is_verified:
         raise HTTPException(status_code=403, detail="Verify email first")
 
@@ -323,8 +348,7 @@ async def forgot_password(request: Request, data: ForgotPassword, db: Session = 
 async def reset_password(request: Request, data: ResetPassword, db: Session = Depends(get_db)):
     if data.new_password != data.confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
-    if len(data.new_password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    _check_password_strength(data.new_password)
 
     payload = decode_token(data.token)
     if payload.get("type") != "reset":
@@ -366,10 +390,92 @@ async def google_login(request: Request, data: GoogleLogin, db: Session = Depend
         "refresh_token": create_refresh_token(email),
     }
 
+# ---------- CHANGE PASSWORD ----------
+@app.post("/change-password")
+@limiter.limit("5/hour")
+async def change_password(
+    request: Request,
+    data: ChangePassword,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    For email/password users: verify the current password, then update to a new one.
+    OAuth-only users (has_password=False) must use POST /create-password instead.
+    Identity is established via the Bearer token — no email field needed in the body.
+    """
+    if not current_user.has_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Your account has no password yet. Use POST /create-password to set one.",
+        )
+    if not current_user.is_verified:
+        raise HTTPException(status_code=403, detail="Verify your email before changing your password")
+    if data.new_password != data.confirm_new_password:
+        raise HTTPException(status_code=400, detail="New passwords do not match")
+    _check_password_strength(data.new_password)
+    if data.current_password == data.new_password:
+        raise HTTPException(status_code=400, detail="New password must differ from current password")
+    if not verify_password(data.current_password, current_user.hashed_password or ""):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    # Re-fetch inside this session to ensure we write to the right row
+    user = db.query(User).filter(User.id == current_user.id).first()
+    user.hashed_password = hash_password(data.new_password)
+    user.has_password    = True   # already True, but be explicit
+    db.commit()
+    return {"message": "Password changed successfully"}
+
+
+# ---------- CREATE PASSWORD (OAuth users) ----------
+@app.post("/create-password")
+@limiter.limit("5/hour")
+async def create_password(
+    request: Request,
+    data: CreatePassword,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Lets OAuth-only users (Google, GitHub, …) add a local password to their account.
+
+    After this call the user can log in with EITHER their OAuth provider
+    OR their email + the newly created password.
+
+    - Requires a valid Bearer access token (i.e. the user must already be
+      signed in via OAuth).
+    - Rejected if the account already has a password — use /change-password instead.
+    """
+    if current_user.has_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Your account already has a password. Use POST /change-password to update it.",
+        )
+    if data.new_password != data.confirm_new_password:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+    if len(data.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    _check_password_strength(data.new_password)
+
+    user = db.query(User).filter(User.id == current_user.id).first()
+    user.hashed_password = hash_password(data.new_password)
+    user.has_password    = True
+    db.commit()
+    return {
+        "message": "Password created successfully. You can now log in with your email and password.",
+    }
+
 # ---------- ME ----------
 @app.get("/me")
 def me(user: User = Depends(get_current_user)):
-    return {"email": user.email, "full_name": user.full_name}
+    return {
+        "email":         user.email,
+        "full_name":     user.full_name,
+        "is_google_user": user.is_google_user,
+        # Frontend uses this to decide: True → "Change Password", False → "Create Password"
+        "has_password":  user.has_password,
+    }
 
 # ---------- CLEANUP (optional scheduled task) ----------
 @app.delete("/admin/revoked-tokens/cleanup", include_in_schema=False)

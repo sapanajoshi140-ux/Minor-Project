@@ -6,6 +6,20 @@ classifies it, processes it through the appropriate service, stores
 metadata + pages in MySQL, generates a searchable PDF, and returns the
 document_id.
 
+OCR Formatting integration
+--------------------------
+After each page is committed to the DB the page ID is pushed onto the
+shared formatting queue (services.ocr_formatter.enqueue_page).  A
+background worker (started in main.py lifespan) drains that queue
+asynchronously using Ollama, so:
+
+  1. Upload completes and returns immediately — workspace shows raw OCR text.
+  2. Background worker formats pages one by one via Ollama.
+  3. Workspace switches to formatted_text once formatting_status=="completed".
+
+Digital pages (ocr_type=="digital") are marked "skipped" — they are already
+well-structured text from LibreOffice/PyMuPDF and need no OCR cleanup.
+
 Auth & quota
 ------------
 - Every request must carry a valid Bearer access token (Authorization header).
@@ -42,6 +56,16 @@ if str(_RAG_DIR) not in sys.path:
     sys.path.insert(0, str(_RAG_DIR))
 
 
+def _needs_formatting(ocr_type: str | None) -> bool:
+    """
+    Return True when a page should be queued for Ollama formatting.
+
+    Digital pages already have clean, structured text (embedded PDF/DOCX).
+    Only printed/handwritten OCR output benefits from reformatting.
+    """
+    return ocr_type in ("printed", "handwritten")
+
+
 @router.post(
     "/upload",
     response_model=UploadResponse,
@@ -63,6 +87,7 @@ async def upload_document(
     6. Generate searchable PDF
     7. Ingest into RAG
     8. Finalise document record and update user storage counter
+    9. Enqueue OCR pages for async Ollama formatting
     """
 
     # ── 1. Validate filename / extension ──────────────────────────────────────
@@ -133,27 +158,50 @@ async def upload_document(
     db.commit()
 
     # ── 6. Process and stream pages into DB ───────────────────────────────────
-    confidences: list[float] = []
-    total_pages = 0
-    all_pages: list[dict] = []
-    is_pure_text = (document_category == "text")
+    confidences:   list[float] = []
+    total_pages    = 0
+    all_pages:     list[dict]  = []
+    is_pure_text   = (document_category == "text")
+
+    # Collect DB page IDs that need async formatting after commit.
+    pages_to_format: list[int] = []   # DocumentPage.id values
 
     try:
         for page in stream_document(str(file_path), file_type):
             total_pages += 1
             all_pages.append(page)
 
-            if not is_pure_text and page.get("extracted_text") is not None:
-                db.add(DocumentPage(
-                    document_id      = doc_id,
-                    page_number      = page["page_number"],
-                    extracted_text   = page.get("extracted_text"),
-                    ocr_type         = page.get("ocr_type"),
-                    confidence_score = page.get("confidence_score"),
-                ))
+            ocr_type      = page.get("ocr_type")
+            raw_text      = page.get("extracted_text")
+            needs_fmt     = _needs_formatting(ocr_type)
+
+            # Determine the initial formatting_status for this page.
+            if is_pure_text or not needs_fmt:
+                fmt_status = "skipped"
+            else:
+                fmt_status = "pending"
+
+            if not is_pure_text and raw_text is not None:
+                db_page = DocumentPage(
+                    document_id             = doc_id,
+                    page_number             = page["page_number"],
+                    extracted_text          = raw_text,
+                    raw_ocr_text            = raw_text,   # immutable original copy
+                    formatted_text          = None,
+                    formatting_status       = fmt_status,
+                    ocr_type                = ocr_type,
+                    confidence_score        = page.get("confidence_score"),
+                )
+                db.add(db_page)
 
                 if page.get("confidence_score") is not None:
                     confidences.append(page["confidence_score"])
+
+                # Flush to get the auto-generated PK without closing the
+                # transaction, so we can collect IDs for the formatter queue.
+                if fmt_status == "pending":
+                    db.flush()
+                    pages_to_format.append(db_page.id)
 
             if total_pages % PAGE_COMMIT_BATCH_SIZE == 0:
                 db.commit()
@@ -195,14 +243,12 @@ async def upload_document(
         ingest_from_file_path = _rag_ingest.ingest_from_file_path
 
         if document_category == "text":
-            # Text doc (PDF / TXT / DOCX / PPTX) — load via generated PDF where needed.
             rag_result = ingest_from_file_path(
                 doc_id,
                 str(file_path),
                 generated_pdf_path=generated_pdf_path,
             )
         else:
-            # Scanned doc — chunk from OCR text already in all_pages.
             rag_result = ingest_from_db_pages(doc_id, all_pages)
 
         logger.info(
@@ -210,7 +256,6 @@ async def upload_document(
             f"{rag_result['chunks']} chunks from {rag_result['pages']} page(s)."
         )
     except Exception as exc:
-        # RAG failure must NOT fail the upload — document is already saved.
         logger.error(f"RAG ingestion failed for {doc_id}: {exc}", exc_info=True)
 
     # ── 9. Finalise document record + update quota counter ────────────────────
@@ -221,7 +266,6 @@ async def upload_document(
     document.generated_pdf_path = generated_pdf_path
     document.processing_status  = "completed"
 
-    # Atomically increment the user's storage counter.
     current_user.used_storage_bytes = User.used_storage_bytes + total_bytes
     db.commit()
 
@@ -230,6 +274,25 @@ async def upload_document(
         f"{total_pages} page(s), category={document_category}, "
         f"user={current_user.email}, size={total_bytes} bytes"
     )
+
+    # ── 10. Enqueue OCR pages for async Ollama formatting ─────────────────────
+    # Done AFTER the document is fully committed so the worker always finds
+    # valid FK references when it opens its own session.
+    if pages_to_format:
+        try:
+            from services.ocr_formatter import enqueue_page
+            for page_id in pages_to_format:
+                enqueue_page(page_id)
+            logger.info(
+                f"Document {doc_id} — {len(pages_to_format)} page(s) enqueued "
+                f"for Ollama formatting."
+            )
+        except Exception as exc:
+            # Formatter unavailable — workspace will still show raw OCR text.
+            logger.warning(
+                f"Could not enqueue formatting for document {doc_id}: {exc}. "
+                f"Raw OCR text will be displayed."
+            )
 
     return UploadResponse(
         document_id=doc_id,

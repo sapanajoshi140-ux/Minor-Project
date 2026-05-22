@@ -82,6 +82,26 @@ RRF_K      = int(os.getenv("RRF_K"))
 BM25_K1    = float(os.getenv("BM25_K1"))
 BM25_B     = float(os.getenv("BM25_B"))
 
+# ── OCR Formatting (Ollama post-processing) ───────────────────
+# Maximum characters per page chunk sent to Ollama in one request.
+# A page above this limit is split into sequential sub-chunks and
+# the formatted pieces are joined back before saving.
+OCR_FORMAT_CHUNK_CHARS = int(os.getenv("OCR_FORMAT_CHUNK_CHARS", "3000"))
+
+# Per-chunk retry attempts when Ollama returns an error or times out.
+OCR_FORMAT_MAX_RETRIES = int(os.getenv("OCR_FORMAT_MAX_RETRIES", "2"))
+
+# Number of pages formatted in parallel by the background worker.
+# Keep at 1–2 unless your Ollama server explicitly supports concurrency.
+FORMAT_CONCURRENCY = int(os.getenv("FORMAT_CONCURRENCY", "2"))
+
+# Maximum in-process queue depth.  Excess pages are dropped with a warning
+# and their formatting_status is left as "pending" for retry on restart.
+FORMAT_QUEUE_SIZE = int(os.getenv("FORMAT_QUEUE_SIZE", "500"))
+
+# Maximum per-page retry attempts before the page is marked "failed".
+FORMAT_MAX_RETRIES = int(os.getenv("FORMAT_MAX_RETRIES", "2"))
+
 # ── Ensure upload dir exists ──────────────────────────────────
 Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
 

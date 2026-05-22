@@ -133,6 +133,7 @@ from schemas import (
     ReadingSessionStartResponse,
     ReadingSessionEndRequest,
     ReadingSessionEndResponse,
+    ReadingSessionHeartbeatRequest,
     ReadingGoalRequest,
     ReadingGoalResponse,
     DashboardResponse,
@@ -297,29 +298,49 @@ def _get_daily_goal(user_id: int, db: Session) -> int:
     return goal.daily_goal_min if goal else DEFAULT_DAILY_GOAL_MIN
 
 
+# Minimum active reading seconds required for a day to count toward a streak.
+_STREAK_MIN_SECONDS = 20 * 60  # 20 minutes
+
+
 def _compute_streaks(user_id: int, db: Session) -> tuple[int, int]:
     """
     Compute (current_streak, best_streak) in days.
 
-    A day counts toward the streak if the user has at least one completed
-    reading session (duration_seconds is not None) on that calendar day.
-    Sessions are grouped by date in the DB's local timezone.
+    A day counts toward the streak only if the user's total *active* reading
+    time on that calendar day reaches at least 20 minutes.  Sessions that are
+    shorter than the threshold individually still aggregate — it's the daily
+    total that must hit 20 min.
+
+    "Active" means duration_seconds is not None (i.e. the session was properly
+    ended and was long enough to survive the MIN_SESSION_DURATION_SECS filter
+    applied in end_reading_session).
     """
+    # Aggregate total seconds per calendar day across ALL documents.
     rows = (
-        db.query(func.date(ReadingSession.started_at).label("day"))
+        db.query(
+            func.date(ReadingSession.started_at).label("day"),
+            func.sum(ReadingSession.duration_seconds).label("total_secs"),
+        )
         .filter(
             ReadingSession.user_id == user_id,
             ReadingSession.duration_seconds.isnot(None),
         )
-        .distinct()
-        .order_by(func.date(ReadingSession.started_at).desc())
+        .group_by(func.date(ReadingSession.started_at))
         .all()
     )
 
     if not rows:
         return 0, 0
 
-    active_dates = sorted({row.day for row in rows}, reverse=True)
+    # Keep only days that meet the 20-minute threshold.
+    active_dates = sorted(
+        {row.day for row in rows if (row.total_secs or 0) >= _STREAK_MIN_SECONDS},
+        reverse=True,
+    )
+
+    if not active_dates:
+        return 0, 0
+
     today = date.today()
 
     # ── Current streak ────────────────────────────────────────────────────────
@@ -334,9 +355,9 @@ def _compute_streaks(user_id: int, db: Session) -> tuple[int, int]:
             break
 
     # ── Best streak ───────────────────────────────────────────────────────────
-    best    = 0
-    run     = 0
-    prev    = None
+    best = 0
+    run  = 0
+    prev = None
     for d in sorted(active_dates):
         if prev is None or d == prev + timedelta(days=1):
             run += 1
@@ -381,26 +402,20 @@ def _build_daily_chart(user_id: int, db: Session, days: int = 14) -> List[DailyR
     return chart
 
 
-def _build_recent_documents(
-    user_id: int, db: Session, limit: int = 5
+def _build_documents_with_time(
+    user_id: int,
+    db: Session,
+    *,
+    limit: Optional[int] = None,
 ) -> List[DocumentTimeEntry]:
     """
-    Return the most recently uploaded documents for the user,
-    each annotated with total seconds spent reading it.
+    Return documents for the user, each annotated with total *active* seconds
+    spent reading it, aggregated across ALL sessions with no document cap.
+
+    Pass limit=N to cap the display list (most-recently-uploaded first).
+    The time aggregation always covers every document regardless of limit.
     """
-    docs = (
-        db.query(Document)
-        .filter(Document.user_id == user_id)
-        .order_by(Document.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-
-    if not docs:
-        return []
-
-    doc_ids = [d.id for d in docs]
-
+    # Aggregate time for ALL documents in one query — not capped to recent docs.
     time_rows = (
         db.query(
             ReadingSession.document_id,
@@ -408,13 +423,25 @@ def _build_recent_documents(
         )
         .filter(
             ReadingSession.user_id == user_id,
-            ReadingSession.document_id.in_(doc_ids),
             ReadingSession.duration_seconds.isnot(None),
         )
         .group_by(ReadingSession.document_id)
         .all()
     )
     time_map: dict[str, int] = {r.document_id: (r.total_secs or 0) for r in time_rows}
+
+    # Fetch documents for display (optionally capped).
+    q = (
+        db.query(Document)
+        .filter(Document.user_id == user_id)
+        .order_by(Document.created_at.desc())
+    )
+    if limit is not None:
+        q = q.limit(limit)
+    docs = q.all()
+
+    if not docs:
+        return []
 
     return [
         DocumentTimeEntry(
@@ -1051,7 +1078,7 @@ def get_dashboard(
     return DashboardResponse(
         stats=stats,
         daily_chart=_build_daily_chart(uid, db, days=DASHBOARD_CHART_DAYS),
-        recent_documents=_build_recent_documents(uid, db, limit=DASHBOARD_RECENT_DOCS_LIMIT),
+        recent_documents=_build_documents_with_time(uid, db, limit=DASHBOARD_RECENT_DOCS_LIMIT),
         vocabulary=_build_vocabulary_entries(uid, db, limit=DASHBOARD_VOCAB_LIMIT),
     )
 
@@ -1142,8 +1169,11 @@ def start_reading_session(
     summary="End a reading session",
     description=(
         "Call this when the user closes or navigates away from a document. "
-        "Computes and stores the duration. "
-        "Sessions shorter than 5 seconds are silently discarded to filter accidental opens."
+        "Pass `active_seconds` — the number of seconds during which the tab was "
+        "visible **and** the user was actively interacting (tracked on the frontend "
+        "with a 5-minute inactivity timeout).  The backend stores this value "
+        "directly so that idle open tabs do not inflate read-time statistics. "
+        "Sessions shorter than the configured minimum are silently discarded."
     ),
 )
 @limiter.limit("30/minute")
@@ -1176,15 +1206,25 @@ def end_reading_session(
             detail="Reading session has already been ended.",
         )
 
-    ended_at         = datetime.utcnow()
-    duration_seconds = int((ended_at - session.started_at).total_seconds())
+    ended_at = datetime.utcnow()
+
+    # Prefer the frontend-reported active seconds (excludes idle/background
+    # time) when provided.  Fall back to wall-clock duration only as a safety
+    # net so older clients that don't yet send the field still work.
+    if data.active_seconds is not None:
+        # Clamp: active time cannot exceed the actual wall-clock elapsed time
+        # (guards against frontend bugs / clock skew).
+        wall_clock = int((ended_at - session.started_at).total_seconds())
+        duration_seconds = max(0, min(data.active_seconds, wall_clock))
+    else:
+        duration_seconds = int((ended_at - session.started_at).total_seconds())
 
     if duration_seconds < MIN_DURATION_SECONDS:
         db.delete(session)
         db.commit()
         logger.debug(
             f"Reading session {data.session_id} discarded "
-            f"(duration {duration_seconds}s < {MIN_DURATION_SECONDS}s minimum)."
+            f"(active duration {duration_seconds}s < {MIN_DURATION_SECONDS}s minimum)."
         )
         return ReadingSessionEndResponse(
             session_id=data.session_id,
@@ -1200,7 +1240,7 @@ def end_reading_session(
 
     logger.info(
         f"Reading session {session.id} ended — "
-        f"user={current_user.email}, duration={duration_seconds}s"
+        f"user={current_user.email}, active_duration={duration_seconds}s"
     )
 
     return ReadingSessionEndResponse(
@@ -1212,7 +1252,119 @@ def end_reading_session(
     )
 
 
-# ── Vocabulary — paginated list ───────────────────────────────────────────────
+# ── Reading session — heartbeat (incremental active time) ─────────────────────
+
+@app.post(
+    "/reading-session/heartbeat",
+    tags=["Dashboard"],
+    summary="Increment active reading time for an open session",
+    description=(
+        "Called by the frontend every 30 s while the tab is visible and the "
+        "user is active.  Each call adds `active_seconds` to the session's "
+        "running total without closing it.  This lets the server reflect "
+        "partial progress for long reading sessions that span page refreshes "
+        "or browser crashes without waiting for /reading-session/end.  "
+        "The value stored here is overwritten (not double-counted) when "
+        "/reading-session/end is later called with its own `active_seconds`."
+    ),
+    status_code=204,
+)
+@limiter.limit("120/minute")
+def reading_session_heartbeat(
+    request: Request,
+    data: ReadingSessionHeartbeatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = (
+        db.query(ReadingSession)
+        .filter(
+            ReadingSession.id == data.session_id,
+            ReadingSession.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not session or session.ended_at is not None:
+        # Session missing or already closed — silently ignore.
+        return Response(status_code=204)
+
+    # Clamp against wall-clock elapsed time.
+    wall_clock = int((datetime.utcnow() - session.started_at).total_seconds())
+    session.duration_seconds = max(0, min(data.active_seconds, wall_clock))
+    db.commit()
+
+    return Response(status_code=204)
+
+
+# ── Per-document read time — all documents ─────────────────────────────────────
+
+@app.get(
+    "/me/documents/time",
+    tags=["Dashboard"],
+    summary="Get total read time per document (all documents)",
+    description=(
+        "Returns total active reading seconds for every document the user has "
+        "ever opened, aggregated in the database layer.  No document cap is "
+        "applied — this is used by analytics views that must reflect the full "
+        "library.  Results are sorted by time_spent_seconds descending."
+    ),
+)
+@limiter.limit("30/minute")
+def get_all_documents_time(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    uid = current_user.id
+
+    # Single aggregation query — O(sessions) not O(documents × sessions).
+    time_rows = (
+        db.query(
+            ReadingSession.document_id,
+            func.sum(ReadingSession.duration_seconds).label("total_secs"),
+        )
+        .filter(
+            ReadingSession.user_id == uid,
+            ReadingSession.duration_seconds.isnot(None),
+        )
+        .group_by(ReadingSession.document_id)
+        .all()
+    )
+    time_map: dict[str, int] = {r.document_id: (r.total_secs or 0) for r in time_rows}
+
+    if not time_map:
+        return {"total_documents": 0, "documents": []}
+
+    # Fetch only documents that have at least one session recorded.
+    docs = (
+        db.query(Document.id, Document.filename, Document.file_type,
+                 Document.file_size_bytes, Document.total_pages, Document.created_at)
+        .filter(
+            Document.user_id == uid,
+            Document.id.in_(list(time_map.keys())),
+        )
+        .all()
+    )
+
+    results = sorted(
+        [
+            {
+                "id":                 d.id,
+                "filename":           d.filename,
+                "file_type":          d.file_type or "",
+                "file_size_bytes":    d.file_size_bytes,
+                "total_pages":        d.total_pages,
+                "created_at":         d.created_at.isoformat() if d.created_at else None,
+                "time_spent_seconds": time_map.get(d.id, 0),
+            }
+            for d in docs
+        ],
+        key=lambda x: x["time_spent_seconds"],
+        reverse=True,
+    )
+
+    return {"total_documents": len(results), "documents": results}
 
 @app.get(
     "/me/vocabulary",

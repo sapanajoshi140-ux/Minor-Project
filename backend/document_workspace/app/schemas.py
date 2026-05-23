@@ -383,8 +383,8 @@ class VocabularyListResponse(BaseModel):
 class WordMeaningResponse(BaseModel):
     word:    str
     meaning: str
-    synonym: str = ""
-    example: str = ""
+    synonym: Optional[str] = None
+    example: Optional[str] = None
     source:  str
 
 

@@ -16,12 +16,18 @@ logger = logging.getLogger(__name__)
 def load_image(file_path: str) -> Image.Image:
     """
     Load an image from disk as a PIL Image (RGB).
+
+    verify() closes the file handle, so we must re-open afterward.
+    Both opens are kept inside the same try/except so any OS-level error
+    (file removed between the two calls, permission change, etc.) is still
+    wrapped as a ValueError instead of leaking a raw OSError.
+
     Raises ValueError for corrupt or unrecognised files.
     """
     try:
         img = Image.open(file_path)
-        img.verify()                   # detect corruption
-        img = Image.open(file_path)    # re-open (verify() closes the file)
+        img.verify()                    # detect corruption; also closes the file
+        img = Image.open(file_path)     # re-open after verify()
         return img.convert("RGB")
     except UnidentifiedImageError:
         raise ValueError(f"Not a valid image file: {file_path}")
@@ -65,7 +71,11 @@ def is_blank_page(image: Image.Image, threshold: float = 0.98) -> bool:
     """
     Return True if the image is mostly white / blank.
     threshold: fraction of pixels that must be near-white (value > 240).
+
+    Skips the convert() call when the image is already in grayscale mode
+    to avoid an unnecessary full-array copy.
     """
-    gray = np.array(image.convert("L"))
+    gray_image = image if image.mode == "L" else image.convert("L")
+    gray = np.array(gray_image)
     white_ratio = np.sum(gray > 240) / gray.size
     return white_ratio >= threshold

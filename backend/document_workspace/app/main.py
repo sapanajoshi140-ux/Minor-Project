@@ -99,6 +99,7 @@ from config import (
     DASHBOARD_CHART_DAYS,
     DASHBOARD_RECENT_DOCS_LIMIT,
     DASHBOARD_VOCAB_LIMIT,
+    USER_STORAGE_LIMIT_BYTES,
 )
 from database import (
     Document,
@@ -110,7 +111,6 @@ from database import (
     SessionLocal,
     User,
     UserVocabulary,
-    USER_STORAGE_LIMIT_BYTES,
     get_db,
 )
 from dependencies import get_current_user, get_current_user_flexible
@@ -181,6 +181,11 @@ from retrieve import retrieve, TOP_K, USE_HYBRID
 logger = logging.getLogger(__name__)
 
 SESSIONS: dict[str, list[dict]] = {}
+
+
+def _session_key(user_id: int, session_id: str) -> str:
+    """Namespace chat history by user so users cannot read each other's sessions."""
+    return f"{user_id}:{session_id}"
 
 
 
@@ -497,8 +502,12 @@ def _build_vocabulary_entries(
     """
     Return the most recently looked-up vocabulary words for the user,
     enriched with meanings from the dictionary table.
+
+    Uses a single JOIN query to fetch meanings in bulk instead of one
+    get_meaning() call per word (which would cause N+1 DB round-trips).
+    Falls back to the API only for words not yet in the dictionary table.
     """
-    from wordlogic import get_meaning
+    from wordlogic import Dictionary, get_meaning
 
     rows = (
         db.query(UserVocabulary)
@@ -507,18 +516,38 @@ def _build_vocabulary_entries(
         .limit(limit)
         .all()
     )
+    if not rows:
+        return []
+
+    # Bulk-fetch dictionary rows for all words in one query.
+    words = [row.word for row in rows]
+    dict_rows = (
+        db.query(Dictionary)
+        .filter(Dictionary.word.in_(words))
+        .all()
+    )
+    dict_map: dict[str, Dictionary] = {d.word: d for d in dict_rows}
 
     entries: List[VocabularyEntry] = []
     for row in rows:
-        meaning_data = get_meaning(row.word)
+        d = dict_map.get(row.word)
+        if d:
+            meaning = d.meaning or "Meaning not found."
+            synonym = d.synonym or None
+        else:
+            # Word not cached yet — hit the API (and let get_meaning persist it).
+            api = get_meaning(row.word)
+            meaning = api.get("meaning", "Meaning not found.")
+            synonym = api.get("synonym") or None
+
         doc_name = None
         if row.document_id and row.document:
             doc_name = row.document.filename
 
         entries.append(VocabularyEntry(
             word=row.word,
-            meaning=meaning_data.get("meaning", ""),
-            synonym=meaning_data.get("synonym"),
+            meaning=meaning,
+            synonym=synonym,
             document_name=doc_name,
             document_id=row.document_id,
             looked_up_at=row.looked_up_at,
@@ -1243,15 +1272,27 @@ async def stream_document_pages(
 
         try:
             # ── Replay already-stored pages (backward compat + reconnects) ─
-            # Fetch all pages currently in the DB for this document.
-            # For each terminal page we emit its best available text so a
-            # client that connects mid-processing or after completion
-            # immediately sees what has been done so far.
             existing_pages = (
                 db.query(DocumentPage)
                 .filter(DocumentPage.document_id == document_id)
                 .order_by(DocumentPage.page_number)
                 .all()
+            )
+
+            # Re-fetch the document to check processing_status.
+            # If the upload pipeline already finished (processing_status ==
+            # "completed"), treat upload as done so _all_terminal() can fire
+            # even if no "upload_complete" event arrives on the queue.
+            # This fixes the hang when a client reconnects mid-formatting or
+            # opens a previously uploaded document.
+            doc_record = (
+                db.query(Document)
+                .filter(Document.id == document_id)
+                .first()
+            )
+            upload_done = (
+                doc_record is not None
+                and doc_record.processing_status == "completed"
             )
 
             replayed_pages: set[int] = set()
@@ -1260,7 +1301,6 @@ async def stream_document_pages(
             for pg in existing_pages:
                 status = pg.formatting_status or "pending"
                 if status in ("completed", "failed", "skipped"):
-                    # Determine the best text to show.
                     if status == "completed" and pg.formatted_text:
                         display = pg.formatted_text
                         evt_type = "formatted"
@@ -1278,9 +1318,6 @@ async def stream_document_pages(
                     })
                     replayed_pages.add(pg.page_number)
                 elif status in ("pending", "processing"):
-                    # Page exists but is not yet terminal — replay raw OCR
-                    # text so the workspace shows something now, and wait for
-                    # the formatting event that will upgrade it.
                     if pg.extracted_text:
                         yield _serialize_event({
                             "event_type":        "ocr_ready",
@@ -1293,27 +1330,25 @@ async def stream_document_pages(
                         replayed_pages.add(pg.page_number)
                     pending_count += 1
 
-            # If everything is already done, close immediately.
             total_db_pages = len(existing_pages)
+
+            # If everything is already in a terminal state, close immediately.
             if total_db_pages > 0 and pending_count == 0:
                 yield _serialize_event({"event_type": "stream_end", "total_pages": total_db_pages})
                 return
 
             # ── Drain live events ──────────────────────────────────────────
-            # Track per-page formatting state to know when all pages are done.
-            # Seed from the DB replay above.
             page_statuses: dict[int, str] = {
                 pg.page_number: (pg.formatting_status or "pending")
                 for pg in existing_pages
             }
-            # Also note which pages need formatting (not skipped/digital).
             needs_fmt_pages: set[int] = {
                 pg.page_number
                 for pg in existing_pages
                 if pg.formatting_status not in ("skipped", "completed", "failed")
             }
 
-            upload_done       = False    # True after "upload_complete" event
+            # upload_done was seeded from doc_record.processing_status above.
             total_pages_known = total_db_pages or None
 
             def _all_terminal() -> bool:
@@ -1838,7 +1873,7 @@ def list_vocabulary(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    from wordlogic import get_meaning
+    from wordlogic import Dictionary, get_meaning
 
     offset = (page - 1) * limit
 
@@ -1857,17 +1892,32 @@ def list_vocabulary(
         .all()
     )
 
+    # Bulk-fetch meanings in one query instead of N get_meaning() calls.
+    words = [row.word for row in rows]
+    dict_map: dict[str, object] = {}
+    if words:
+        dict_rows = db.query(Dictionary).filter(Dictionary.word.in_(words)).all()
+        dict_map = {d.word: d for d in dict_rows}
+
     entries: List[VocabularyEntry] = []
     for row in rows:
-        meaning_data = get_meaning(row.word)
+        d = dict_map.get(row.word)
+        if d:
+            meaning = d.meaning or "Meaning not found."
+            synonym = d.synonym or None
+        else:
+            api = get_meaning(row.word)
+            meaning = api.get("meaning", "Meaning not found.")
+            synonym = api.get("synonym") or None
+
         doc_name = None
         if row.document_id and row.document:
             doc_name = row.document.filename
 
         entries.append(VocabularyEntry(
             word=row.word,
-            meaning=meaning_data.get("meaning", ""),
-            synonym=meaning_data.get("synonym"),
+            meaning=meaning,
+            synonym=synonym,
             document_name=doc_name,
             document_id=row.document_id,
             looked_up_at=row.looked_up_at,
@@ -1899,7 +1949,7 @@ def search_vocabulary(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    from wordlogic import get_meaning
+    from wordlogic import Dictionary, get_meaning
 
     offset  = (page - 1) * limit
     pattern = f"%{q.lower()}%"
@@ -1925,17 +1975,32 @@ def search_vocabulary(
         .all()
     )
 
+    # Bulk-fetch meanings in one query instead of N get_meaning() calls.
+    words = [row.word for row in rows]
+    dict_map: dict[str, object] = {}
+    if words:
+        dict_rows = db.query(Dictionary).filter(Dictionary.word.in_(words)).all()
+        dict_map = {d.word: d for d in dict_rows}
+
     entries: List[VocabularyEntry] = []
     for row in rows:
-        meaning_data = get_meaning(row.word)
+        d = dict_map.get(row.word)
+        if d:
+            meaning = d.meaning or "Meaning not found."
+            synonym = d.synonym or None
+        else:
+            api = get_meaning(row.word)
+            meaning = api.get("meaning", "Meaning not found.")
+            synonym = api.get("synonym") or None
+
         doc_name = None
         if row.document_id and row.document:
             doc_name = row.document.filename
 
         entries.append(VocabularyEntry(
             word=row.word,
-            meaning=meaning_data.get("meaning", ""),
-            synonym=meaning_data.get("synonym"),
+            meaning=meaning,
+            synonym=synonym,
             document_name=doc_name,
             document_id=row.document_id,
             looked_up_at=row.looked_up_at,
@@ -2176,13 +2241,17 @@ def word_pronounce(
 # ═════════════════════════════════════════════════════════════════════════════
 
 @app.post("/chat", response_model=ChatResponse, tags=["RAG"])
-def chat(req: ChatRequest):
+def chat(
+    req: ChatRequest,
+    current_user: User = Depends(get_current_user),
+):
     question = _clean_text(req.question)
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
     session_id = req.session_id or str(uuid.uuid4())
-    history    = SESSIONS.setdefault(session_id, [])
+    key        = _session_key(current_user.id, session_id)
+    history    = SESSIONS.setdefault(key, [])
 
     chunks = retrieve(query=question, doc_ids=req.doc_ids, top_k=req.top_k, use_hybrid=req.use_hybrid)
     if not chunks:
@@ -2196,13 +2265,17 @@ def chat(req: ChatRequest):
 
 
 @app.post("/chat/stream", tags=["RAG"])
-def chat_stream(req: ChatRequest):
+def chat_stream(
+    req: ChatRequest,
+    current_user: User = Depends(get_current_user),
+):
     question = _clean_text(req.question)
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
     session_id = req.session_id or str(uuid.uuid4())
-    history    = SESSIONS.setdefault(session_id, [])
+    key        = _session_key(current_user.id, session_id)
+    history    = SESSIONS.setdefault(key, [])
 
     chunks = retrieve(query=question, doc_ids=req.doc_ids, top_k=req.top_k, use_hybrid=req.use_hybrid)
     if not chunks:
@@ -2227,7 +2300,10 @@ def chat_stream(req: ChatRequest):
 
 
 @app.post("/summarize", response_model=SummarizeResponse, tags=["RAG"])
-def summarize(req: SummarizeRequest):
+def summarize(
+    req: SummarizeRequest,
+    current_user: User = Depends(get_current_user),
+):
     cleaned = _clean_text(req.text)
     if not cleaned:
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
@@ -2241,7 +2317,10 @@ def summarize(req: SummarizeRequest):
 
 
 @app.post("/summarize/stream", tags=["RAG"])
-def summarize_stream(req: SummarizeRequest):
+def summarize_stream(
+    req: SummarizeRequest,
+    current_user: User = Depends(get_current_user),
+):
     cleaned = _clean_text(req.text)
     if not cleaned:
         raise HTTPException(status_code=400, detail="Text cannot be empty.")
@@ -2258,13 +2337,21 @@ def summarize_stream(req: SummarizeRequest):
 
 
 @app.get("/session/{session_id}/history", response_model=SessionHistoryResponse, tags=["RAG"])
-def get_history(session_id: str):
-    return SessionHistoryResponse(session_id=session_id, history=SESSIONS.get(session_id, []))
+def get_history(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    key = _session_key(current_user.id, session_id)
+    return SessionHistoryResponse(session_id=session_id, history=SESSIONS.get(key, []))
 
 
 @app.delete("/session/{session_id}", tags=["RAG"])
-def clear_session(session_id: str):
-    SESSIONS.pop(session_id, None)
+def clear_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    key = _session_key(current_user.id, session_id)
+    SESSIONS.pop(key, None)
     return {"status": "cleared", "session_id": session_id}
 
 

@@ -326,12 +326,13 @@ def _build_ocr_text_pdf(pages: List[dict], out_path: Path, filename: str = "") -
             story.append(Spacer(1, 3))
             return
         safe = _xml_escape(_safe_text(stripped))
-        if stripped.startswith("### "):
-            story.append(Paragraph(safe[4:], _heading_style(3)))
-        elif stripped.startswith("## "):
-            story.append(Paragraph(safe[3:], _heading_style(2)))
-        elif stripped.startswith("# "):
-            story.append(Paragraph(safe[2:], _heading_style(1)))
+        # Match heading levels 1–6 (######...# prefix)
+        import re as _re
+        heading_match = _re.match(r"^(#{1,6}) (.+)", stripped)
+        if heading_match:
+            level = len(heading_match.group(1))
+            text  = _xml_escape(_safe_text(heading_match.group(2)))
+            story.append(Paragraph(text, _heading_style(level)))
         elif stripped.startswith(("• ", "- ")):
             story.append(Paragraph(safe, bullet_sty))
         else:

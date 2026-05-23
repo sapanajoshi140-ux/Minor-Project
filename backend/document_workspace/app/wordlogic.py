@@ -2,14 +2,15 @@ import asyncio
 import io
 import requests
 import edge_tts
-from sqlalchemy import create_engine, text, Column, String, Text
-from sqlalchemy.orm import declarative_base, Session
+from sqlalchemy import text, Column, String, Text
+from sqlalchemy.orm import declarative_base
 
-from config import DATABASE_URL
+from database import SessionLocal, engine as _engine
 
 # ─── Database Setup ────────────────────────────────────────────────────────────
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+# Reuse the engine and session factory from database.py — creating a second
+# engine would open a second connection pool to the same DB, wasting resources.
 Base = declarative_base()
 
 
@@ -24,8 +25,8 @@ class Dictionary(Base):
 
 def init_db():
     """Create the dictionary table and index if they do not exist yet."""
-    Base.metadata.create_all(bind=engine)
-    with engine.connect() as conn:
+    Base.metadata.create_all(bind=_engine)
+    with _engine.connect() as conn:
         result = conn.execute(text("""
             SELECT COUNT(*)
             FROM information_schema.statistics
@@ -99,7 +100,8 @@ def get_meaning(word: str) -> dict:
     """
     word = word.lower().strip()
 
-    with Session(engine) as session:
+    session = SessionLocal()
+    try:
         row = session.get(Dictionary, word)
 
         if row:
@@ -141,6 +143,8 @@ def get_meaning(word: str) -> dict:
             "meaning": "Meaning not found.",
             "source":  "Error",
         }
+    finally:
+        session.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -189,8 +193,11 @@ def log_vocabulary_lookup(
         if db_session is not None:
             _insert(db_session)
         else:
-            with Session(engine) as session:
+            session = SessionLocal()
+            try:
                 _insert(session)
+            finally:
+                session.close()
 
     except Exception as exc:
         # Swallow silently — vocabulary logging is non-critical.
@@ -250,5 +257,24 @@ def get_phonetic(word: str) -> str:
 def get_pronunciation_audio(word: str) -> io.BytesIO:
     """
     Generate pronunciation audio via Edge TTS and return as in-memory MP3 buffer.
+
+    Uses asyncio.run() which starts a fresh event loop — safe to call from a
+    sync context (FastAPI threadpool).  Never call this from inside a running
+    event loop (e.g. from an async route directly); use
+    ``await _edge_tts_to_buffer(word)`` there instead.
     """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        # We're inside a running event loop (e.g. called from an async route).
+        # Schedule the coroutine as a task and block via run_until_complete on
+        # a new thread-local loop to avoid deadlocking the main loop.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _edge_tts_to_buffer(word.strip()))
+            return future.result()
+
     return asyncio.run(_edge_tts_to_buffer(word.strip()))

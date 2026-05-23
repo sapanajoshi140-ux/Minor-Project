@@ -126,9 +126,7 @@ def _render_slide_to_pil(pptx_path: str, slide_index: int) -> Optional[object]:
             return Image.open(io.BytesIO(pix.tobytes("png")))
 
     except Exception as exc:
-        # FIX: was silently returning a 1×1 blank image.  Log clearly and
-        #      return None so the caller can skip this slide rather than
-        #      storing empty OCR results.
+        
         logger.warning(
             f"Slide rendering failed (slide index {slide_index}, file '{pptx_path}'): "
             f"{exc} — slide will be skipped."
@@ -148,7 +146,7 @@ def _ocr_slide(pptx_path: str, slide_index: int) -> Optional[dict]:
 
     pil_image = _render_slide_to_pil(pptx_path, slide_index)
 
-    # FIX: propagate None from renderer — caller skips the slide.
+
     if pil_image is None:
         return None
 
@@ -214,9 +212,7 @@ def process_ppt_file(file_path: str) -> List[dict]:
                 logger.info(f"Slide {slide_num}: image-only — running OCR.")
                 ocr_data = _ocr_slide(file_path, slide_idx)
 
-                # FIX: skip slide if rendering returned None (LibreOffice
-                #      unavailable or conversion failed) rather than storing
-                #      empty text silently.
+               
                 if ocr_data is None:
                     logger.warning(
                         f"Slide {slide_num}: skipped (rendering unavailable)."

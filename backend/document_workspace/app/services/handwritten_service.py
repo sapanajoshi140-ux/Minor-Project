@@ -47,7 +47,9 @@ _LOCAL_PATHS: dict[str, str] = {
 
 # In-process singleton cache: mode → (processor, model, device) | _LOAD_FAILED
 _cache: dict = {}
-_LOAD_FAILED  = "_failed"           # sentinel — avoids repeated costly retries
+# Failure sentinel — a unique object so identity checks (is _LOAD_FAILED)
+# can never accidentally match a real cached value or a plain string.
+_LOAD_FAILED = object()
 
 
 # ── Shared result dataclass ───────────────────────────────────────────────────

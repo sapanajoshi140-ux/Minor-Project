@@ -21,8 +21,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 # ── Config from .env ──────────────────────────────────────────────────────────
 _BASE           = pathlib.Path(__file__).parent
-CHROMA_DIR      = os.getenv("CHROMA_DIR",      str(_BASE / "data" / ".chromadb"))
-COLLECTION_NAME = os.getenv("CHROMA_COLLECTION")
+CHROMA_DIR      = os.getenv("CHROMA_DIR",        str(_BASE / "data" / ".chromadb"))
+COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "documents")
 
 
 # ── Data model ────────────────────────────────────────────────────────────────

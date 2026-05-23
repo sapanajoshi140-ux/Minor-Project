@@ -43,6 +43,7 @@ from schemas import UploadResponse
 from services.parser_service import FileType, detect_file_type, stream_document
 from services.classifier_service import classify_document
 from services.pdf_generator_service import generate_searchable_pdf
+from services.ocr_formatter import enqueue_page, notify_page_event
 from dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -199,9 +200,24 @@ async def upload_document(
 
                 # Flush to get the auto-generated PK without closing the
                 # transaction, so we can collect IDs for the formatter queue.
+                # Both pending and skipped pages are flushed so the PK exists
+                # before we push the SSE event.
+                db.flush()
                 if fmt_status == "pending":
-                    db.flush()
                     pages_to_format.append(db_page.id)
+
+                # ── Progressive streaming: notify SSE subscribers immediately.
+                # Raw OCR text is in the DB (flushed) and ready to display;
+                # the workspace should render this page without waiting for the
+                # rest of the document or for Ollama formatting to complete.
+                notify_page_event(doc_id, {
+                    "event_type":        "ocr_ready",
+                    "page_number":       page["page_number"],
+                    "formatting_status": fmt_status,
+                    "display_text":      raw_text,
+                    "ocr_type":          ocr_type,
+                    "confidence_score":  page.get("confidence_score"),
+                })
 
             if total_pages % PAGE_COMMIT_BATCH_SIZE == 0:
                 db.commit()
@@ -209,6 +225,13 @@ async def upload_document(
 
         db.commit()
         logger.info(f"Document {doc_id} — final page batch committed ({total_pages} total).")
+
+        # Notify subscribers that all OCR pages have been extracted and stored.
+        # The stream will remain open until Ollama formatting completes.
+        notify_page_event(doc_id, {
+            "event_type":  "upload_complete",
+            "total_pages": total_pages,
+        })
 
     except Exception as exc:
         logger.error(f"Processing failed for document {doc_id}: {exc}", exc_info=True)
@@ -280,8 +303,8 @@ async def upload_document(
     # valid FK references when it opens its own session.
     if pages_to_format:
         try:
-            from services.ocr_formatter import enqueue_page
             for page_id in pages_to_format:
+                enqueue_page(page_id)
                 enqueue_page(page_id)
             logger.info(
                 f"Document {doc_id} — {len(pages_to_format)} page(s) enqueued "

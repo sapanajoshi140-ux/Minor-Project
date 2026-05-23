@@ -432,6 +432,42 @@ class SessionHistoryResponse(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Progressive page streaming  — GET /documents/{id}/stream
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PageStreamEvent(BaseModel):
+    """
+    One SSE event pushed to the client during progressive document rendering.
+
+    event_type values
+    -----------------
+    "ocr_ready"      — OCR has extracted this page; raw text is in the DB.
+                       display_text is the raw OCR output.
+    "formatted"      — Ollama has finished formatting this page.
+                       display_text is the cleaned, Markdown-formatted version.
+    "failed"         — Ollama formatting failed after all retries.
+                       display_text falls back to the raw OCR text.
+    "upload_complete"— All OCR pages have been extracted (formatting may still
+                       be in progress).  page_number is None for this event.
+    "stream_end"     — All pages are fully processed (completed|failed|skipped).
+                       The SSE connection will close after this event.
+
+    Frontend rendering rule (same as REST endpoints)
+    ------------------------------------------------
+    When event_type is "formatted", replace the page's displayed text with
+    display_text.  For all other events, render display_text as-is.
+    Never re-render a page that already received a "formatted" event.
+    """
+    event_type:        str
+    page_number:       Optional[int]   = None
+    formatting_status: Optional[str]   = None
+    display_text:      Optional[str]   = None
+    ocr_type:          Optional[str]   = None
+    confidence_score:  Optional[float] = None
+    total_pages:       Optional[int]   = None   # present in upload_complete only
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Health
 # ══════════════════════════════════════════════════════════════════════════════
 

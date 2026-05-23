@@ -60,6 +60,108 @@ logger = logging.getLogger(__name__)
 FORMAT_QUEUE: asyncio.Queue[int] = asyncio.Queue(maxsize=FORMAT_QUEUE_SIZE)
 
 
+# ── Per-document SSE stream registry ─────────────────────────────────────────
+# Maps document_id → list of asyncio.Queue instances (one per active SSE
+# subscriber).  Both upload.py (ocr_ready events) and the formatting worker
+# (formatted / failed events) push PageStreamEvent dicts onto these queues.
+# The SSE endpoint in main.py drains the queue and forwards to the client.
+#
+# Lifecycle:
+#   1. SSE endpoint calls get_doc_stream_queue(doc_id) → gets a fresh Queue.
+#   2. upload.py and _format_one_page push events via notify_page_event().
+#   3. SSE endpoint calls release_doc_stream(doc_id, queue) when the client
+#      disconnects or the document is fully processed.
+#
+# Thread-safety: all mutations are done from the asyncio event loop only.
+# _DOC_STREAMS is never touched from a thread-pool executor.
+
+_DOC_STREAMS: dict[str, list[asyncio.Queue]] = {}
+
+
+def get_doc_stream_queue(document_id: str) -> "asyncio.Queue[Optional[dict]]":
+    """
+    Register a new SSE subscriber for *document_id*.
+
+    Returns a fresh asyncio.Queue.  Each event pushed via notify_page_event()
+    will be placed on ALL registered queues for that document.  A sentinel
+    value of None signals end-of-stream to the consumer.
+
+    Must be called from the asyncio event loop.
+    """
+    q: asyncio.Queue = asyncio.Queue(maxsize=500)
+    _DOC_STREAMS.setdefault(document_id, []).append(q)
+    logger.debug(f"Stream: registered subscriber for doc {document_id} "
+                 f"(total={len(_DOC_STREAMS[document_id])}).")
+    return q
+
+
+def notify_page_event(document_id: str, event: dict) -> None:
+    """
+    Broadcast *event* to all SSE subscribers of *document_id*.
+
+    *event* is a plain dict; callers must set at minimum:
+        event_type : "ocr_ready" | "formatted" | "failed" | "upload_complete"
+        page_number: int  (omit only for "upload_complete")
+
+    Non-blocking: full queues are skipped with a debug log — slow or
+    disconnected clients should not stall the upload or formatter.
+
+    Must be called from the asyncio event loop (use loop.call_soon_threadsafe
+    when calling from a thread-pool executor).
+    """
+    queues = _DOC_STREAMS.get(document_id)
+    if not queues:
+        return
+    for q in queues:
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.debug(
+                f"Stream: subscriber queue full for doc {document_id}; "
+                f"dropping event {event.get('event_type')}."
+            )
+
+
+def release_doc_stream(document_id: str, queue: "asyncio.Queue") -> None:
+    """
+    Deregister *queue* from *document_id*'s subscriber list.
+
+    Called by the SSE endpoint when the client disconnects or the stream ends.
+    If no subscribers remain, the entry is removed from _DOC_STREAMS.
+
+    Must be called from the asyncio event loop.
+    """
+    queues = _DOC_STREAMS.get(document_id)
+    if queues is None:
+        return
+    try:
+        queues.remove(queue)
+    except ValueError:
+        pass
+    if not queues:
+        _DOC_STREAMS.pop(document_id, None)
+    logger.debug(f"Stream: released subscriber for doc {document_id}.")
+
+
+# Event-loop reference — set once by run_formatting_worker() at startup.
+# Used by thread-pool DB helpers to schedule SSE notifications safely.
+_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _notify_from_thread(document_id: str, event: dict) -> None:
+    """
+    Thread-safe wrapper around notify_page_event().
+
+    DB helper functions run in thread-pool executors and cannot call
+    notify_page_event() directly (asyncio data structures are not thread-safe).
+    This helper uses the stored event-loop reference to schedule the call
+    back on the event-loop thread via call_soon_threadsafe.
+    """
+    loop = _loop
+    if loop is not None and not loop.is_closed():
+        loop.call_soon_threadsafe(notify_page_event, document_id, event)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Public enqueue helper
 # ══════════════════════════════════════════════════════════════════════════════
@@ -241,9 +343,12 @@ def _db_fetch_page(page_id: int) -> Optional[dict]:
             return None
         return {
             "id":               page.id,
+            "document_id":      page.document_id,
+            "page_number":      page.page_number,
             "extracted_text":   page.extracted_text,
             "formatting_status": page.formatting_status,
             "ocr_type":         page.ocr_type,
+            "confidence_score": page.confidence_score,
         }
     finally:
         db.close()
@@ -290,6 +395,13 @@ def _db_save_formatted(page_id: int, formatted_text: str) -> None:
         page.formatting_completed_at = datetime.utcnow()
         db.commit()
         logger.info(f"Formatter: page {page_id} completed ({len(formatted_text)} chars).")
+        # Notify SSE subscribers that this page's formatted text is ready.
+        _notify_from_thread(page.document_id, {
+            "event_type":        "formatted",
+            "page_number":       page.page_number,
+            "formatting_status": "completed",
+            "display_text":      formatted_text or page.extracted_text or "",
+        })
     except Exception as exc:
         logger.error(f"DB save_formatted failed for page {page_id}: {exc}")
         db.rollback()
@@ -309,6 +421,13 @@ def _db_mark_failed(page_id: int) -> None:
         page.formatting_completed_at = datetime.utcnow()
         db.commit()
         logger.warning(f"Formatter: page {page_id} marked failed.")
+        # Notify subscribers: formatting failed, workspace keeps raw OCR text.
+        _notify_from_thread(page.document_id, {
+            "event_type":        "failed",
+            "page_number":       page.page_number,
+            "formatting_status": "failed",
+            "display_text":      page.extracted_text or "",
+        })
     except Exception as exc:
         logger.error(f"DB mark_failed failed for page {page_id}: {exc}")
         db.rollback()
@@ -387,7 +506,9 @@ async def run_formatting_worker() -> None:
 
         asyncio.create_task(run_formatting_worker())
     """
+    global _loop
     loop = asyncio.get_event_loop()
+    _loop = loop   # store for use by thread-pool DB helpers
     logger.info(
         f"OCR formatting worker started "
         f"(concurrency={FORMAT_CONCURRENCY}, "

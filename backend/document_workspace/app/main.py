@@ -163,6 +163,8 @@ from schemas import (
     SessionHistoryResponse,
     # health
     HealthResponse,
+    # streaming
+    PageStreamEvent,
 )
 from services.pdf_generator_service import generate_searchable_pdf
 
@@ -1158,6 +1160,243 @@ def get_formatting_status(
             all_done=all_done,
         ),
         pages=page_entries,
+    )
+
+
+
+# ── Progressive page stream (SSE) ─────────────────────────────────────────────
+
+@app.get(
+    "/documents/{document_id}/stream",
+    tags=["Documents"],
+    summary="Stream page events as OCR and formatting complete (SSE)",
+    description=(
+        "Server-Sent Events stream that pushes one JSON event per page as soon as "
+        "its raw OCR text is extracted, and again when Ollama formatting completes.\n\n"
+        "**Event types**\n"
+        "- `ocr_ready`      — raw OCR text is stored; render page immediately.\n"
+        "- `formatted`      — Ollama formatted text is ready; replace raw text.\n"
+        "- `failed`         — formatting failed; keep showing raw OCR text.\n"
+        "- `upload_complete`— all OCR pages extracted (formatting may continue).\n"
+        "- `stream_end`     — document fully processed; close the connection.\n\n"
+        "**Frontend usage**\n"
+        "1. Start the SSE connection immediately after calling POST /upload.\n"
+        "2. On `ocr_ready`: append the page to the workspace.\n"
+        "3. On `formatted`: replace that page's text with display_text.\n"
+        "4. On `stream_end` or connection close: stop listening.\n\n"
+        "**Backward compatibility**\n"
+        "For already-uploaded documents, the stream immediately replays all "
+        "completed pages then closes. Pages still pending formatting remain "
+        "visible via their raw OCR text from GET /documents/{id}/view."
+    ),
+)
+@limiter.limit("30/minute")
+async def stream_document_pages(
+    request: Request,
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    SSE endpoint for progressive document rendering.
+
+    Architecture
+    ------------
+    1. Ownership guard — reject unauthorised access immediately.
+    2. Register a subscriber queue with ocr_formatter._DOC_STREAMS so that
+       both upload.py (ocr_ready events) and the formatting worker
+       (formatted/failed events) can push events to this connection.
+    3. Replay already-completed pages from the DB so clients that connect
+       after upload starts (or re-open a finished document) see all pages.
+    4. Drain the subscriber queue until all pages are in a terminal state
+       (completed | failed | skipped) — then send stream_end and close.
+    5. Detect client disconnect via request.is_disconnected() and clean up.
+
+    The stream never blocks the event loop: all DB access is either done
+    upfront (replay) or via awaitable queue.get() with a timeout.
+    """
+    import json as _json
+
+    _get_owned_document(document_id, db, current_user)
+
+    from services.ocr_formatter import (
+        get_doc_stream_queue,
+        release_doc_stream,
+    )
+
+    def _serialize_event(event_dict: dict) -> str:
+        """Serialise one event dict as an SSE data line."""
+        return f"data: {_json.dumps(event_dict)}\n\n"
+
+    async def _event_generator():
+        # ── Register subscriber queue ──────────────────────────────────────
+        queue = get_doc_stream_queue(document_id)
+
+        try:
+            # ── Replay already-stored pages (backward compat + reconnects) ─
+            # Fetch all pages currently in the DB for this document.
+            # For each terminal page we emit its best available text so a
+            # client that connects mid-processing or after completion
+            # immediately sees what has been done so far.
+            existing_pages = (
+                db.query(DocumentPage)
+                .filter(DocumentPage.document_id == document_id)
+                .order_by(DocumentPage.page_number)
+                .all()
+            )
+
+            replayed_pages: set[int] = set()
+            pending_count = 0
+
+            for pg in existing_pages:
+                status = pg.formatting_status or "pending"
+                if status in ("completed", "failed", "skipped"):
+                    # Determine the best text to show.
+                    if status == "completed" and pg.formatted_text:
+                        display = pg.formatted_text
+                        evt_type = "formatted"
+                    else:
+                        display = pg.extracted_text or ""
+                        evt_type = "ocr_ready"
+
+                    yield _serialize_event({
+                        "event_type":        evt_type,
+                        "page_number":       pg.page_number,
+                        "formatting_status": status,
+                        "display_text":      display,
+                        "ocr_type":          pg.ocr_type,
+                        "confidence_score":  pg.confidence_score,
+                    })
+                    replayed_pages.add(pg.page_number)
+                elif status in ("pending", "processing"):
+                    # Page exists but is not yet terminal — replay raw OCR
+                    # text so the workspace shows something now, and wait for
+                    # the formatting event that will upgrade it.
+                    if pg.extracted_text:
+                        yield _serialize_event({
+                            "event_type":        "ocr_ready",
+                            "page_number":       pg.page_number,
+                            "formatting_status": status,
+                            "display_text":      pg.extracted_text,
+                            "ocr_type":          pg.ocr_type,
+                            "confidence_score":  pg.confidence_score,
+                        })
+                        replayed_pages.add(pg.page_number)
+                    pending_count += 1
+
+            # If everything is already done, close immediately.
+            total_db_pages = len(existing_pages)
+            if total_db_pages > 0 and pending_count == 0:
+                yield _serialize_event({"event_type": "stream_end", "total_pages": total_db_pages})
+                return
+
+            # ── Drain live events ──────────────────────────────────────────
+            # Track per-page formatting state to know when all pages are done.
+            # Seed from the DB replay above.
+            page_statuses: dict[int, str] = {
+                pg.page_number: (pg.formatting_status or "pending")
+                for pg in existing_pages
+            }
+            # Also note which pages need formatting (not skipped/digital).
+            needs_fmt_pages: set[int] = {
+                pg.page_number
+                for pg in existing_pages
+                if pg.formatting_status not in ("skipped", "completed", "failed")
+            }
+
+            upload_done       = False    # True after "upload_complete" event
+            total_pages_known = total_db_pages or None
+
+            def _all_terminal() -> bool:
+                """True when every known page is in a terminal state."""
+                if not upload_done:
+                    return False
+                return all(
+                    s in ("completed", "failed", "skipped")
+                    for s in page_statuses.values()
+                )
+
+            # Stream events until all pages are terminal or client disconnects.
+            while True:
+                if await request.is_disconnected():
+                    logger.debug(f"Stream: client disconnected for doc {document_id}.")
+                    break
+
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    # No new event — check termination condition and loop.
+                    if _all_terminal():
+                        yield _serialize_event({
+                            "event_type":  "stream_end",
+                            "total_pages": total_pages_known,
+                        })
+                        break
+                    continue
+
+                if event is None:
+                    # Sentinel — producer signals end of stream.
+                    yield _serialize_event({
+                        "event_type":  "stream_end",
+                        "total_pages": total_pages_known,
+                    })
+                    break
+
+                evt_type = event.get("event_type")
+
+                if evt_type == "upload_complete":
+                    upload_done = True
+                    total_pages_known = event.get("total_pages", total_pages_known)
+                    yield _serialize_event(event)
+                    if _all_terminal():
+                        yield _serialize_event({
+                            "event_type":  "stream_end",
+                            "total_pages": total_pages_known,
+                        })
+                        break
+                    continue
+
+                page_num = event.get("page_number")
+
+                if evt_type == "ocr_ready":
+                    # Only forward if we haven't already replayed this page.
+                    if page_num not in replayed_pages:
+                        page_statuses[page_num] = event.get("formatting_status", "pending")
+                        if event.get("formatting_status") in ("skipped",):
+                            # Digital / skipped — no further update expected.
+                            pass
+                        else:
+                            needs_fmt_pages.add(page_num)
+                        yield _serialize_event(event)
+                    else:
+                        # Update our internal status tracker even if we skip
+                        # re-emitting (client already has this page from replay).
+                        new_status = event.get("formatting_status", "pending")
+                        page_statuses[page_num] = new_status
+
+                elif evt_type in ("formatted", "failed"):
+                    page_statuses[page_num] = event.get("formatting_status", evt_type)
+                    needs_fmt_pages.discard(page_num)
+                    yield _serialize_event(event)
+
+                    if _all_terminal():
+                        yield _serialize_event({
+                            "event_type":  "stream_end",
+                            "total_pages": total_pages_known,
+                        })
+                        break
+
+        finally:
+            release_doc_stream(document_id, queue)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":               "no-cache",
+            "X-Accel-Buffering":           "no",   # disable nginx buffering
+            "Access-Control-Allow-Origin": "*",
+        },
     )
 
 

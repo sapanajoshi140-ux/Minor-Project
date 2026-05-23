@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, BigInteger
 from sqlalchemy.orm import sessionmaker, declarative_base
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from dotenv import load_dotenv
 
@@ -32,7 +32,7 @@ class User(Base):
     has_password       = Column(Boolean,     default=False, nullable=False)
     # Storage quota tracking — max 100 MB per user (104_857_600 bytes)
     used_storage_bytes = Column(BigInteger,  default=0, nullable=False)
-    created_at         = Column(DateTime,    default=datetime.utcnow)
+    created_at         = Column(DateTime,    default=lambda: datetime.now(timezone.utc))
 
 
 class RevokedToken(Base):
@@ -52,7 +52,7 @@ class RevokedToken(Base):
     jti        = Column(String(36), unique=True, nullable=False, index=True)  # UUID per token
     token_type = Column(String(20), nullable=False)   # "access" | "refresh"
     expires_at = Column(DateTime,   nullable=False)    # natural JWT expiry
-    revoked_at = Column(DateTime,   default=datetime.utcnow)
+    revoked_at = Column(DateTime,   default=lambda: datetime.now(timezone.utc))
 
 
 # Create tables

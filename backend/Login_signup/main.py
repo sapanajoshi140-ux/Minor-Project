@@ -1,16 +1,20 @@
+import re
+from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
 from fastapi.openapi.utils import get_openapi
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from datetime import datetime
 import os
 from dotenv import load_dotenv
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import SessionLocal, User, RevokedToken
 from schemas import (
@@ -22,18 +26,21 @@ from auth import (
     hash_password, verify_password,
     create_access_token, create_refresh_token,
     create_email_token, create_reset_token,
-    decode_token, get_google_user
+    decode_token, get_google_user,
+    TokenExpiredError, TokenInvalidError,
 )
 from email_config import send_email, verify_email_html, reset_email_html
 
-from contextlib import asynccontextmanager
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
 load_dotenv()
 
-FRONTEND_URL = os.getenv("FRONTEND_URL")
-BACKEND_URL  = os.getenv("BACKEND_URL")
-CORS_ORIGINS = os.getenv("CORS_ORIGINS").split(",")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "")
+BACKEND_URL  = os.getenv("BACKEND_URL", "")
+
+
+_raw_origins = os.getenv("CORS_ORIGINS", "")
+CORS_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+if not CORS_ORIGINS:
+    raise ValueError("CORS_ORIGINS is not set. Check your .env file.")
 
 # ---------- SCHEDULER / LIFESPAN ----------
 _scheduler = AsyncIOScheduler()
@@ -42,11 +49,9 @@ def _cleanup_revoked_tokens() -> None:
     """Purge expired blacklist rows — runs daily."""
     db = SessionLocal()
     try:
-        deleted = (
-            db.query(RevokedToken)
-            .filter(RevokedToken.expires_at < datetime.utcnow())
-            .delete()
-        )
+        db.query(RevokedToken) \
+          .filter(RevokedToken.expires_at < datetime.now(timezone.utc)) \
+          .delete()
         db.commit()
     except Exception:
         db.rollback()
@@ -113,7 +118,7 @@ def get_db():
     finally:
         db.close()
 
-# ---------- BLACKLIST HELPER ----------
+# ---------- BLACKLIST HELPERS ----------
 def _is_revoked(jti: str, db: Session) -> bool:
     """Return True if the token's jti exists in the revoked_tokens table."""
     return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
@@ -123,10 +128,9 @@ def _revoke(payload: dict, db: Session) -> None:
     jti = payload.get("jti")
     if not jti:
         return  # old token without jti — nothing to store
-    # Avoid duplicate-key error if somehow called twice for the same token
     if db.query(RevokedToken).filter(RevokedToken.jti == jti).first():
-        return
-    exp = datetime.utcfromtimestamp(payload["exp"])
+        return  # already revoked
+    exp = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
     db.add(RevokedToken(
         jti        = jti,
         token_type = payload.get("type", "unknown"),
@@ -147,7 +151,6 @@ def get_current_user(
         if payload.get("type") != "access":
             raise HTTPException(status_code=401, detail="Invalid token type")
 
-        # Blacklist check — reject tokens revoked at logout
         if _is_revoked(payload.get("jti", ""), db):
             raise HTTPException(status_code=401, detail="Token has been revoked. Please log in again.")
 
@@ -159,16 +162,20 @@ def get_current_user(
 
     except HTTPException:
         raise
+    except TokenExpiredError:
+        raise HTTPException(status_code=401, detail="Token has expired. Please log in again.")
+    except TokenInvalidError:
+        raise HTTPException(status_code=401, detail="Invalid token.")
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 # ---------- PASSWORD STRENGTH ----------
+# Fix #9 — import re at module level, not inside the function on every call
 def _check_password_strength(password: str) -> None:
     """
     Enforce a baseline password policy.  Raises HTTPException 400 on failure.
     Rules: ≥8 chars, at least one uppercase, one lowercase, one digit.
     """
-    import re
     errors = []
     if len(password) < 8:
         errors.append("at least 8 characters")
@@ -201,16 +208,18 @@ async def signup(request: Request, data: Signup, db: Session = Depends(get_db)):
             is_verified     = False,
             is_google_user  = False,
             has_password    = True,
-            created_at      = datetime.utcnow(),
+            created_at      = datetime.now(timezone.utc),
         )
         db.add(user)
+
+
+        db.commit()
+        db.refresh(user)
 
         token = create_email_token(user.email)
         link  = f"{BACKEND_URL}/verify-email?token={token}"
         await send_email(user.email, "Verify your email", verify_email_html(user.full_name, link))
 
-        db.commit()
-        db.refresh(user)
         return {"message": "Signup successful. Please check your email to verify."}
 
     except IntegrityError:
@@ -220,10 +229,18 @@ async def signup(request: Request, data: Signup, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail="Signup failed. Please try again.")
 
+
 # ---------- VERIFY EMAIL ----------
 @app.get("/verify-email")
 def verify_email(token: str, db: Session = Depends(get_db)):
-    payload = decode_token(token)
+
+    try:
+        payload = decode_token(token)
+    except TokenExpiredError:
+        raise HTTPException(status_code=400, detail="Verification link has expired. Please request a new one.")
+    except TokenInvalidError:
+        raise HTTPException(status_code=400, detail="Invalid verification link.")
+
     if payload.get("type") != "email":
         raise HTTPException(status_code=400, detail="Invalid token")
 
@@ -236,6 +253,7 @@ def verify_email(token: str, db: Session = Depends(get_db)):
         db.commit()
 
     return {"message": "Email verified successfully!", "redirect": f"{FRONTEND_URL}/login"}
+
 
 # ---------- RESEND VERIFICATION ----------
 @app.post("/resend-verification")
@@ -252,6 +270,7 @@ async def resend_verification(request: Request, data: ResendVerificationRequest,
     link  = f"{BACKEND_URL}/verify-email?token={token}"
     await send_email(user.email, "Verify your email", verify_email_html(user.full_name, link))
     return {"message": "Verification email sent"}
+
 
 # ---------- LOGIN ----------
 @app.post("/login")
@@ -271,6 +290,7 @@ async def login(request: Request, data: Login, db: Session = Depends(get_db)):
         "access_token":  create_access_token(user.email),
         "refresh_token": create_refresh_token(user.email),
     }
+
 
 # ---------- LOGOUT ----------
 @app.post("/logout")
@@ -307,26 +327,31 @@ async def logout(
     except Exception as e:
         errors.append(f"Refresh token: {e}")
 
-    # We always return 200 — partial revocation is still a valid logout.
-    # The frontend should discard both tokens regardless.
+
     if errors:
         return {"message": "Logged out (with warnings)", "warnings": errors}
     return {"message": "Logged out successfully"}
+
 
 # ---------- REFRESH ----------
 @app.post("/refresh")
 @limiter.limit("10/minute")
 async def refresh(request: Request, data: RefreshToken, db: Session = Depends(get_db)):
-    payload = decode_token(data.refresh_token)
+    try:
+        payload = decode_token(data.refresh_token)
+    except TokenExpiredError:
+        raise HTTPException(status_code=401, detail="Refresh token has expired. Please log in again.")
+    except TokenInvalidError:
+        raise HTTPException(status_code=401, detail="Invalid refresh token.")
 
     if payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    # Blacklist check — prevents use of a refresh token after logout
     if _is_revoked(payload.get("jti", ""), db):
         raise HTTPException(status_code=401, detail="Refresh token has been revoked. Please log in again.")
 
     return {"access_token": create_access_token(payload["sub"])}
+
 
 # ---------- FORGOT PASSWORD ----------
 @app.post("/forgot-password")
@@ -342,6 +367,7 @@ async def forgot_password(request: Request, data: ForgotPassword, db: Session = 
     await send_email(user.email, "Reset your password", reset_email_html(user.full_name, link))
     return {"message": "Reset password link sent to your email"}
 
+
 # ---------- RESET PASSWORD ----------
 @app.post("/reset-password")
 @limiter.limit("5/hour")
@@ -350,7 +376,14 @@ async def reset_password(request: Request, data: ResetPassword, db: Session = De
         raise HTTPException(status_code=400, detail="Passwords do not match")
     _check_password_strength(data.new_password)
 
-    payload = decode_token(data.token)
+
+    try:
+        payload = decode_token(data.token)
+    except TokenExpiredError:
+        raise HTTPException(status_code=400, detail="Reset link has expired. Please request a new one.")
+    except TokenInvalidError:
+        raise HTTPException(status_code=400, detail="Invalid reset token.")
+
     if payload.get("type") != "reset":
         raise HTTPException(status_code=400, detail="Invalid reset token")
 
@@ -360,7 +393,12 @@ async def reset_password(request: Request, data: ResetPassword, db: Session = De
 
     user.hashed_password = hash_password(data.new_password)
     db.commit()
+
+
+    _revoke(payload, db)
+
     return {"message": "Password reset successful"}
+
 
 # ---------- GOOGLE LOGIN ----------
 @app.post("/google-login")
@@ -374,21 +412,28 @@ async def google_login(request: Request, data: GoogleLogin, db: Session = Depend
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
+        # New user — create an OAuth-only account
         user = User(
             email          = email,
             full_name      = g_user.get("name"),
             is_verified    = True,
             is_google_user = True,
-            created_at     = datetime.utcnow(),
+            created_at     = datetime.now(timezone.utc),
         )
         db.add(user)
         db.commit()
         db.refresh(user)
+    else:
+
+        if not user.is_google_user:
+            user.is_google_user = True
+            db.commit()
 
     return {
         "access_token":  create_access_token(email),
         "refresh_token": create_refresh_token(email),
     }
+
 
 # ---------- CHANGE PASSWORD ----------
 @app.post("/change-password")
@@ -419,7 +464,6 @@ async def change_password(
     if not verify_password(data.current_password, current_user.hashed_password or ""):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
 
-    # Re-fetch inside this session to ensure we write to the right row
     user = db.query(User).filter(User.id == current_user.id).first()
     user.hashed_password = hash_password(data.new_password)
     user.has_password    = True   # already True, but be explicit
@@ -453,8 +497,7 @@ async def create_password(
         )
     if data.new_password != data.confirm_new_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
-    if len(data.new_password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
 
     _check_password_strength(data.new_password)
 
@@ -466,28 +509,34 @@ async def create_password(
         "message": "Password created successfully. You can now log in with your email and password.",
     }
 
+
 # ---------- ME ----------
 @app.get("/me")
 def me(user: User = Depends(get_current_user)):
     return {
-        "email":         user.email,
-        "full_name":     user.full_name,
+        "email":          user.email,
+        "full_name":      user.full_name,
         "is_google_user": user.is_google_user,
         # Frontend uses this to decide: True → "Change Password", False → "Create Password"
-        "has_password":  user.has_password,
+        "has_password":   user.has_password,
     }
 
-# ---------- CLEANUP (optional scheduled task) ----------
+
 @app.delete("/admin/revoked-tokens/cleanup", include_in_schema=False)
-def cleanup_revoked_tokens(db: Session = Depends(get_db)):
+def cleanup_revoked_tokens(
+    db: Session = Depends(get_db),
+    _admin: User = Depends(get_current_user),   # any valid token is sufficient;
+                                                  # extend to an is_admin check if needed
+):
     """
     Delete blacklist rows whose natural expiry has already passed.
     These tokens are harmless — they can never be decoded as valid — so
-    keeping them only wastes storage.  Call this from a cron job daily.
+    keeping them only wastes storage.  Also runs automatically via the
+    daily APScheduler job.
     """
     deleted = (
         db.query(RevokedToken)
-        .filter(RevokedToken.expires_at < datetime.utcnow())
+        .filter(RevokedToken.expires_at < datetime.now(timezone.utc))
         .delete()
     )
     db.commit()

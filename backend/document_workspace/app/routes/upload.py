@@ -37,8 +37,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
-from config import UPLOAD_DIR, MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB, PAGE_COMMIT_BATCH_SIZE
-from database import Document, DocumentPage, User, USER_STORAGE_LIMIT_BYTES, get_db
+from config import UPLOAD_DIR, MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB, PAGE_COMMIT_BATCH_SIZE, USER_STORAGE_LIMIT_BYTES
+from database import Document, DocumentPage, User, get_db
 from schemas import UploadResponse
 from services.parser_service import FileType, detect_file_type, stream_document
 from services.classifier_service import classify_document
@@ -182,12 +182,15 @@ async def upload_document(
             else:
                 fmt_status = "pending"
 
-            if not is_pure_text and raw_text is not None:
+            # Persist every page (including digital ones with extracted_text=None
+            # from mixed PDFs) so the page record always exists in the DB.
+            # Without this, navigating to a digital page in a mixed PDF returns 404.
+            if not is_pure_text:
                 db_page = DocumentPage(
                     document_id             = doc_id,
                     page_number             = page["page_number"],
-                    extracted_text          = raw_text,
-                    raw_ocr_text            = raw_text,   # immutable original copy
+                    extracted_text          = raw_text or "",
+                    raw_ocr_text            = raw_text if raw_text is not None else None,
                     formatted_text          = None,
                     formatting_status       = fmt_status,
                     ocr_type                = ocr_type,
@@ -200,24 +203,20 @@ async def upload_document(
 
                 # Flush to get the auto-generated PK without closing the
                 # transaction, so we can collect IDs for the formatter queue.
-                # Both pending and skipped pages are flushed so the PK exists
-                # before we push the SSE event.
                 db.flush()
                 if fmt_status == "pending":
                     pages_to_format.append(db_page.id)
 
-                # ── Progressive streaming: notify SSE subscribers immediately.
-                # Raw OCR text is in the DB (flushed) and ready to display;
-                # the workspace should render this page without waiting for the
-                # rest of the document or for Ollama formatting to complete.
-                notify_page_event(doc_id, {
-                    "event_type":        "ocr_ready",
-                    "page_number":       page["page_number"],
-                    "formatting_status": fmt_status,
-                    "display_text":      raw_text,
-                    "ocr_type":          ocr_type,
-                    "confidence_score":  page.get("confidence_score"),
-                })
+                # Only push SSE events for pages that have actual text to show.
+                if raw_text:
+                    notify_page_event(doc_id, {
+                        "event_type":        "ocr_ready",
+                        "page_number":       page["page_number"],
+                        "formatting_status": fmt_status,
+                        "display_text":      raw_text,
+                        "ocr_type":          ocr_type,
+                        "confidence_score":  page.get("confidence_score"),
+                    })
 
             if total_pages % PAGE_COMMIT_BATCH_SIZE == 0:
                 db.commit()

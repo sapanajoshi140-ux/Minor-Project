@@ -3,7 +3,6 @@ File utility helpers — validation, safe naming, size checks, deletion.
 """
 
 import logging
-import shutil
 import uuid
 from pathlib import Path
 
@@ -33,22 +32,35 @@ def ensure_directory(path: str | Path) -> Path:
     return p
 
 
+class FileDeleteError(OSError):
+    """Raised when a file exists but cannot be deleted."""
+
+
 def safe_delete_file(file_path: str | Path) -> bool:
     """
     Delete a file safely.
-    Returns True if deleted, False if it did not exist or deletion failed.
+
+    Returns:
+        True  — file existed and was deleted successfully.
+        False — file did not exist (no-op); logged as a warning.
+
+    Raises:
+        FileDeleteError — file exists but could not be deleted (permission
+                          error, I/O error, etc.).  Callers that previously
+                          relied on the False-on-error behaviour should catch
+                          this exception explicitly.
     """
-    try:
-        p = Path(file_path)
-        if p.exists():
-            p.unlink()
-            logger.info(f"Deleted: {p}")
-            return True
+    p = Path(file_path)
+    if not p.exists():
         logger.warning(f"File not found, skipping delete: {p}")
         return False
+    try:
+        p.unlink()
+        logger.info(f"Deleted: {p}")
+        return True
     except Exception as exc:
         logger.error(f"Error deleting {file_path}: {exc}")
-        return False
+        raise FileDeleteError(f"Could not delete {file_path}: {exc}") from exc
 
 
 def get_file_size_mb(file_path: str | Path) -> float:
@@ -61,5 +73,12 @@ def get_file_size_mb(file_path: str | Path) -> float:
 
 
 def get_extension(filename: str) -> str:
-    """Return the lowercase extension without the leading dot, e.g. 'pdf'."""
+    """
+    Return the lowercase extension without the leading dot, e.g. 'pdf'.
+
+    Note: for multi-part suffixes such as 'archive.tar.gz' only the last
+    component ('gz') is returned, because Path.suffix only captures the
+    final dot segment.  If your use-case requires full suffix awareness,
+    use Path(filename).suffixes instead.
+    """
     return Path(filename).suffix.lstrip(".").lower()

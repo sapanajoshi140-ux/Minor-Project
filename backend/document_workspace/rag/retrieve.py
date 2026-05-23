@@ -23,7 +23,7 @@ load_dotenv()
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from ingest import embed_query
-from vector_db import Chunk, get_store
+from vector_db import Chunk, get_doc_store as get_store
 
 # ── Config from .env ──────────────────────────────────────────────────────────
 TOP_K      = int(os.getenv("TOP_K",    "5"))

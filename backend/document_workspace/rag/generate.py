@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -20,10 +19,10 @@ from vector_db import Chunk
 __all__ = ["build_context", "generate_answer", "generate_answer_stream", "summarize_text", "summarize_text_stream"]
 
 # ── Config from .env ──────────────────────────────────────────────────────────
-LLM_MODEL       = os.getenv("LLM_MODEL")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
-CONTEXT_WINDOW  = int(os.getenv("CONTEXT_WINDOW"))
-LLM_TIMEOUT     = int(os.getenv("LLM_TIMEOUT"))
+LLM_MODEL       = os.getenv("LLM_MODEL",       "llama3")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+CONTEXT_WINDOW  = int(os.getenv("CONTEXT_WINDOW", "4096"))
+LLM_TIMEOUT     = int(os.getenv("LLM_TIMEOUT",    "120"))
 
 # ── Subtopic synonym map ──────────────────────────────────────────────────────
 # Maps any user word → canonical subtopic keyword used for chunk scanning

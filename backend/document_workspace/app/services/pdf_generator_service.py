@@ -71,10 +71,20 @@ def generate_searchable_pdf(
     ext      = Path(original_file_path).suffix.lstrip(".").lower()
     filename = Path(original_filename or original_file_path).stem
 
+    # ── PDF input ─────────────────────────────────────────────────────────────
+    # If it's a scanned PDF with extracted/edited OCR pages, build a clean
+    # text PDF from those pages instead of copying the original image PDF.
+    # Only passthrough if there are no OCR pages (e.g. a digital/text PDF).
     if ext in _PDF_EXT:
-        shutil.copy2(original_file_path, out_path)
-        logger.info(f"PDF passthrough: {out_path}")
-        return str(out_path)
+        has_ocr_text = any((p.get("extracted_text") or "").strip() for p in pages)
+        if document_category == "scanned" and has_ocr_text:
+            _build_ocr_text_pdf(pages, out_path, filename)
+            logger.info(f"Scanned PDF → OCR text PDF (edited): {out_path}")
+            return str(out_path)
+        else:
+            shutil.copy2(original_file_path, out_path)
+            logger.info(f"PDF passthrough (no OCR pages): {out_path}")
+            return str(out_path)
 
     if ext in _TEXT_DOC_EXTS:
         _libreoffice_convert(original_file_path, out_path)

@@ -837,6 +837,8 @@ def bulk_edit_document(
         )
         if page:
             page.extracted_text = entry.extracted_text
+            if page.formatting_status == "completed" and page.formatted_text:
+              page.formatted_text = entry.extracted_text
             updated.append(entry.page_number)
         else:
             skipped.append(entry.page_number)
@@ -993,7 +995,7 @@ def view_document(
         filename=doc.filename,
         document_category="scanned",
         total_pages=doc.total_pages,
-        pdf_url=None,
+        pdf_url=f"/document/{document_id}/pdf" if doc.generated_pdf_path else None,
         ocr_lines=ocr_lines,
         formatting_summary=fmt_summary,
     )
@@ -1030,14 +1032,21 @@ def generate_pdf(
     )
     pages_data = [
         {
-            "page_number":      p.page_number,
-            "extracted_text":   p.extracted_text,
+            "page_number": p.page_number,
+            # User edits are saved to extracted_text.
+            # If formatting ran after the edit it lives in formatted_text —
+            # prefer extracted_text (user edit) first, then formatted_text,
+            # then fall back to raw OCR.
+            "extracted_text": (
+                p.extracted_text
+                if p.extracted_text and p.extracted_text.strip()
+                else p.formatted_text or ""
+            ),
             "ocr_type":         p.ocr_type,
             "confidence_score": p.confidence_score,
         }
         for p in pages
     ]
-
     try:
         pdf_path = generate_searchable_pdf(
             document_id=document_id,

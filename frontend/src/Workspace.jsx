@@ -4,8 +4,6 @@ import ChatPanel   from './ChatPanel';
 import { getFreshHeaders, isValidHeaders, getToken } from './Docutils';
 import { Spinner, Toast, EndOfDocument, menuBtnStyle } from './Sharedui';
 import { useBottomInfiniteScroll } from './Hooks';
-
-// ── Note component — single unified floating note section ────────────────────
 import { CenteredNoteButton, FloatingNotePanel } from './NoteSection';
 
 const DOC_API_URL = import.meta.env.VITE_DOCUMENT_API_URL || 'http://localhost:8001';
@@ -15,9 +13,6 @@ const getRagHeaders = () => ({
   'Authorization': `Bearer ${localStorage.getItem('access_token') || ''}`,
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Workspace
-// ─────────────────────────────────────────────────────────────────────────────
 const Workspace = ({
   documentId,
   totalPages: totalPagesProp,
@@ -41,14 +36,12 @@ const Workspace = ({
   const pagesRef           = useRef([]);
   const pageRefs           = useRef({});
 
-  // ── 1. guardedHeaders — defined FIRST, used everywhere ───────────────────
   const guardedHeaders = useCallback(() => {
     const h = getFreshHeaders();
     if (!isValidHeaders(h)) { onAuthError(); return null; }
     return h;
   }, [onAuthError]);
 
-  // ── 2. tickActiveTime ─────────────────────────────────────────────────────
   const tickActiveTime = useCallback(() => {
     const now = Date.now();
     const sinceActivity = now - lastActivityRef.current;
@@ -61,13 +54,11 @@ const Workspace = ({
     lastActivityRef.current = Date.now();
   }, []);
 
-  // ── 3. handleBack ─────────────────────────────────────────────────────────
   const handleBack = useCallback(() => {
     tickActiveTime();
     onBack(activeSecsRef.current);
   }, [onBack, tickActiveTime]);
 
-  // ── 4. Heartbeat effect ───────────────────────────────────────────────────
   useEffect(() => {
     const events = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
     events.forEach(e => window.addEventListener(e, recordActivity, { passive: true }));
@@ -97,7 +88,6 @@ const Workspace = ({
     };
   }, [sessionId, BASE, guardedHeaders, tickActiveTime, recordActivity]);
 
-  // ── 5. popstate effect ────────────────────────────────────────────────────
   useEffect(() => {
     const onPopState = () => {
       tickActiveTime();
@@ -117,44 +107,38 @@ const Workspace = ({
   const [isSpeaking,      setIsSpeaking]      = useState(false);
   const [pdfUrl,          setPdfUrl]          = useState('');
   const [phonetic,        setPhonetic]        = useState('');
-
-  const [meaningPopup, setMeaningPopup] = useState({ show: false, x: 0, y: 0, text: '', result: '', loading: false });
-
-  const [docMeta,    setDocMeta]    = useState(null);
-  const [totalPages, setTotalPages] = useState(totalPagesProp || 0);
-
+  const [meaningPopup,    setMeaningPopup]    = useState({ show: false, x: 0, y: 0, text: '', result: '', loading: false });
+  const [docMeta,         setDocMeta]         = useState(null);
+  const [totalPages,      setTotalPages]      = useState(totalPagesProp || 0);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
-  const [pdfGenStatus,    setPdfGenStatus]     = useState('');
-  const [pdfGenMessage,   setPdfGenMessage]    = useState('');
-
-  // ── PDF ready modal state ─────────────────────────────────────────────────
+  const [pdfGenStatus,    setPdfGenStatus]    = useState('');
+  const [pdfGenMessage,   setPdfGenMessage]   = useState('');
   const [pdfReadyModal,   setPdfReadyModal]   = useState(false);
   const [generatedPdfUrl, setGeneratedPdfUrl] = useState('');
-
-  const [dirtyPages,     setDirtyPages]     = useState(new Set());
-  const [isBulkSaving,   setIsBulkSaving]   = useState(false);
-  const [bulkSaveStatus, setBulkSaveStatus] = useState('');
-
-  const [streamingPage, setStreamingPage] = useState(null);
+  const [dirtyPages,      setDirtyPages]      = useState(new Set());
+  const [isBulkSaving,    setIsBulkSaving]    = useState(false);
+  const [bulkSaveStatus,  setBulkSaveStatus]  = useState('');
+  const [streamingPage,   setStreamingPage]   = useState(null);
   const streamAbortRef = useRef(null);
-
   const [injectedMessage, setInjectedMessage] = useState(null);
   const [lengthPicker,    setLengthPicker]    = useState(false);
   const [pageLoadError,   setPageLoadError]   = useState(false);
-
   const [pageNotes,       setPageNotes]       = useState({});
   const [openNotePageNum, setOpenNotePageNum] = useState(null);
-
+  const [theme,           setTheme]           = useState(() => localStorage.getItem('rwe-theme') || 'light');
   const scrollRef = useRef(null);
+
+  // ── Apply theme to <html> element ─────────────────────────────────────────
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('rwe-theme', theme);
+  }, [theme]);
 
   const isTextDoc = documentCategory === 'text';
   const hasMore   = currentPage < totalPages;
 
-  // ── Mobile: which panel is active on small screens ───────────────────────
-  // 'doc' = document view, 'chat' = chat panel
   const [mobileTab, setMobileTab] = useState('doc');
-  // Detect mobile
-  const [isMobile, setIsMobile] = useState(false);
+  const [isMobile,  setIsMobile]  = useState(false);
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 768);
     check();
@@ -162,7 +146,6 @@ const Workspace = ({
     return () => window.removeEventListener('resize', check);
   }, []);
 
-  // Chat panel width: 520 on desktop, full width on mobile
   const CHAT_WIDTH = isMobile ? window.innerWidth : 520;
 
   // ── OCR Formatting state ──────────────────────────────────────────────────
@@ -184,7 +167,6 @@ const Workspace = ({
 
   const pollFormattingStatusRef = useRef(null);
 
-  // ── saveNote ──────────────────────────────────────────────────────────────
   const saveNote = useCallback(async (pageNum, text) => {
     const headers = guardedHeaders();
     if (!headers) return;
@@ -197,7 +179,6 @@ const Workspace = ({
     if (!res.ok) throw new Error('Failed to save note');
   }, [BASE, documentId, guardedHeaders, onAuthError]);
 
-  // ── Document metadata ─────────────────────────────────────────────────────
   const fetchDocumentMeta = useCallback(async () => {
     const headers = guardedHeaders();
     if (!headers) return;
@@ -213,7 +194,6 @@ const Workspace = ({
     }
   }, [documentId, BASE, guardedHeaders, onAuthError]);
 
-  // ── Unified view ──────────────────────────────────────────────────────────
   const fetchDocumentView = useCallback(async () => {
     const headers = guardedHeaders();
     if (!headers) return false;
@@ -235,10 +215,7 @@ const Workspace = ({
         setFmtSummary(data.formatting_summary);
         if (!data.formatting_summary.all_done) {
           clearInterval(fmtPollRef.current);
-          fmtPollRef.current = setInterval(
-            () => pollFormattingStatusRef.current?.(),
-            4000,
-          );
+          fmtPollRef.current = setInterval(() => pollFormattingStatusRef.current?.(), 4000);
           setFmtPolling(true);
         } else {
           clearInterval(fmtPollRef.current);
@@ -267,13 +244,11 @@ const Workspace = ({
         }
         const pageList = Object.values(pageMap).sort((a, b) => a.page_number - b.page_number);
         setPages(pageList);
-
         const lastPage = pageList[pageList.length - 1].page_number;
         currentPageRef.current = lastPage;
         setCurrentPage(lastPage);
         return true;
       }
-
       return false;
     } catch (err) {
       console.error('Failed to fetch document view:', err);
@@ -281,7 +256,6 @@ const Workspace = ({
     }
   }, [BASE, documentId, guardedHeaders, onAuthError]);
 
-  // ── OCR formatting status polling ─────────────────────────────────────────
   const pollFormattingStatus = useCallback(async () => {
     const headers = guardedHeaders();
     if (!headers) return;
@@ -290,7 +264,6 @@ const Workspace = ({
       if (!res.ok) return;
       const data = await res.json();
       setFmtSummary(data.summary);
-
       if (data.summary.all_done) {
         setFmtPolling(false);
         clearInterval(fmtPollRef.current);
@@ -301,40 +274,26 @@ const Workspace = ({
     }
   }, [BASE, documentId, guardedHeaders, fetchDocumentView]);
 
-  useEffect(() => {
-    pollFormattingStatusRef.current = pollFormattingStatus;
-  }, [pollFormattingStatus]);
-
-  useEffect(() => {
-    return () => clearInterval(fmtPollRef.current);
-  }, []);
-
+  useEffect(() => { pollFormattingStatusRef.current = pollFormattingStatus; }, [pollFormattingStatus]);
+  useEffect(() => { return () => clearInterval(fmtPollRef.current); }, []);
   useEffect(() => { pagesRef.current = pages; }, [pages]);
 
   useEffect(() => {
     if (isTextDoc) return;
     const observers = [];
-
     pages.forEach((page) => {
       const el = pageRefs.current[page.page_number];
       if (!el) return;
-
       const obs = new IntersectionObserver(
-        ([entry]) => {
-          if (entry.isIntersecting) {
-            setCurrentPage(page.page_number);
-          }
-        },
+        ([entry]) => { if (entry.isIntersecting) setCurrentPage(page.page_number); },
         { threshold: 0.3 }
       );
       obs.observe(el);
       observers.push(obs);
     });
-
     return () => observers.forEach(obs => obs.disconnect());
   }, [pages, isTextDoc]);
 
-  // ── Load notes ────────────────────────────────────────────────────────────
   useEffect(() => {
     const loadNotes = async () => {
       const headers = guardedHeaders();
@@ -353,7 +312,6 @@ const Workspace = ({
     loadNotes();
   }, [documentId, BASE, guardedHeaders]);
 
-  // ── Text document: PDF URL ────────────────────────────────────────────────
   useEffect(() => {
     if (isTextDoc) {
       const token = getToken();
@@ -366,7 +324,6 @@ const Workspace = ({
     window.speechSynthesis?.cancel();
   }, []);
 
-  // ── Auto-dismiss toasts ───────────────────────────────────────────────────
   useEffect(() => {
     if (!bulkSaveStatus) return;
     const id = setTimeout(() => setBulkSaveStatus(''), 3000);
@@ -378,26 +335,21 @@ const Workspace = ({
     const id = setTimeout(() => { setPdfGenStatus(''); setPdfGenMessage(''); }, 4000);
   }, [pdfGenStatus]);
 
-  // ── Save single page ──────────────────────────────────────────────────────
   const handleContentChange = (pageNum, newText) => {
     setPages(prev => prev.map(p => p.page_number === pageNum ? { ...p, extracted_text: newText } : p));
     setDirtyPages(prev => new Set(prev).add(pageNum));
   };
 
-  // ── Bulk save ─────────────────────────────────────────────────────────────
   const handleBulkSave = useCallback(async () => {
     if (dirtyPages.size === 0) return;
     setIsBulkSaving(true);
-
     const headers = guardedHeaders();
     if (!headers) { setIsBulkSaving(false); return; }
-
     const payload = {
       pages: pages
         .filter(p => dirtyPages.has(p.page_number))
         .map(p => ({ page_number: p.page_number, extracted_text: p.extracted_text || '' })),
     };
-
     try {
       const res = await fetch(`${BASE}/document/${documentId}/edit`, {
         method: 'PUT',
@@ -407,7 +359,6 @@ const Workspace = ({
       if (res.status === 401) { onAuthError(); return; }
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Bulk save failed.');
-
       if (data.updated_pages?.length) {
         setDirtyPages(prev => {
           const n = new Set(prev);
@@ -424,24 +375,17 @@ const Workspace = ({
     }
   }, [dirtyPages, pages, documentId, BASE, guardedHeaders, onAuthError]);
 
-  // ── Generate PDF ──────────────────────────────────────────────────────────
   const handleGeneratePdf = async () => {
     setIsGeneratingPdf(true);
     const headers = guardedHeaders();
     if (!headers) { setIsGeneratingPdf(false); return; }
-
     try {
-      const res = await fetch(`${BASE}/documents/${documentId}/generate-pdf`, {
-        method: 'POST',
-        headers,
-      });
+      const res = await fetch(`${BASE}/documents/${documentId}/generate-pdf`, { method: 'POST', headers });
       if (res.status === 401) { onAuthError(); return; }
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'PDF generation failed.');
-
       const token = getToken();
       const newPdfUrl = `${BASE}/document/${documentId}/pdf?token=${encodeURIComponent(token)}&t=${Date.now()}`;
-
       setPdfUrl(newPdfUrl);
       setGeneratedPdfUrl(newPdfUrl);
       setPdfReadyModal(true);
@@ -455,7 +399,6 @@ const Workspace = ({
     }
   };
 
-  // ── Reformat ──────────────────────────────────────────────────────────────
   const handleReformat = async () => {
     const headers = guardedHeaders();
     if (!headers) return;
@@ -463,36 +406,28 @@ const Workspace = ({
       await fetch(`${BASE}/document/${documentId}/reformat`, { method: 'POST', headers });
       setFmtPolling(true);
       clearInterval(fmtPollRef.current);
-      fmtPollRef.current = setInterval(
-        () => pollFormattingStatusRef.current?.(),
-        4000,
-      );
+      fmtPollRef.current = setInterval(() => pollFormattingStatusRef.current?.(), 4000);
     } catch (err) {
       console.error('Reformat request failed:', err);
     }
   };
 
-  // ── NDJSON streaming ──────────────────────────────────────────────────────
   const fetchPageStreaming = useCallback(async (pageNum) => {
     const alreadyLoaded = pagesRef.current.find(
       p => p.page_number === pageNum && p.extracted_text?.trim()
     );
     if (alreadyLoaded) return true;
-
     const headers = guardedHeaders();
     if (!headers) return null;
-
     streamAbortRef.current?.abort();
     const controller = new AbortController();
     streamAbortRef.current = controller;
-
     setStreamingPage(pageNum);
     setPages(prev =>
       prev.find(p => p.page_number === pageNum)
         ? prev
         : [...prev, { page_number: pageNum, extracted_text: '', _streaming: true }]
     );
-
     try {
       const res = await fetch(`${BASE}/document/${documentId}/page/${pageNum}/lines`, {
         headers,
@@ -504,18 +439,15 @@ const Workspace = ({
         setStreamingPage(null);
         return null;
       }
-
       const reader  = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop();
-
         for (const raw of lines) {
           const trimmed = raw.trim();
           if (!trimmed) continue;
@@ -530,10 +462,9 @@ const Workspace = ({
                 )
               );
             }
-          } catch { /* malformed JSON line — skip */ }
+          } catch { /* skip */ }
         }
       }
-
       setPages(prev => prev.map(p => p.page_number === pageNum ? { ...p, _streaming: false } : p));
       setStreamingPage(null);
       return true;
@@ -549,18 +480,14 @@ const Workspace = ({
   const fetchPage = useCallback(async (pageNum, retries = 4, delayMs = 800) => {
     const headers = guardedHeaders();
     if (!headers) return null;
-
     for (let attempt = 0; attempt <= retries; attempt++) {
       const res = await fetch(`${BASE}/document/${documentId}/page/${pageNum}`, { headers });
       if (res.status === 401) { onAuthError(); return null; }
       if (res.ok) return await res.json();
-
       if (res.status === 404 && attempt < retries) {
-        console.warn(`Page ${pageNum} not ready (attempt ${attempt + 1}/${retries}), retrying…`);
         await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
         continue;
       }
-
       throw new Error(`Failed to fetch page ${pageNum} (HTTP ${res.status})`);
     }
     return null;
@@ -571,7 +498,6 @@ const Workspace = ({
     if (!headers) return;
     const nextPageNum = afterPage + 1;
     if (nextPageNum > totalPages) return;
-
     try {
       const res = await fetch(
         `${BASE}/document/${documentId}/pages?page=${Math.ceil(nextPageNum / limit)}&limit=${limit}`,
@@ -579,7 +505,6 @@ const Workspace = ({
       );
       if (!res.ok || res.status === 401) return;
       const data = await res.json();
-
       if (data.pages?.length) {
         setPages(prev => {
           const existing = new Set(prev.map(p => p.page_number));
@@ -601,7 +526,6 @@ const Workspace = ({
     if (isLoadingMore || currentPageRef.current >= totalPages) return;
     setIsLoadingMore(true);
     setPageLoadError(false);
-
     try {
       const nextPage = currentPageRef.current + 1;
       if (pagesRef.current.find(p => p.page_number === nextPage && p.extracted_text?.trim())) {
@@ -610,7 +534,6 @@ const Workspace = ({
         setIsLoadingMore(false);
         return;
       }
-
       const streamed = await fetchPageStreaming(nextPage);
       if (streamed === null) {
         let pageData = null;
@@ -622,7 +545,6 @@ const Workspace = ({
           setIsLoadingMore(false);
           return;
         }
-
         if (pageData) {
           setPages(prev =>
             prev.find(p => p.page_number === pageData.page_number)
@@ -634,20 +556,16 @@ const Workspace = ({
           return;
         }
       }
-
       currentPageRef.current = nextPage;
       setCurrentPage(nextPage);
-
       if (nextPage === 1) prefetchPageBatch(nextPage);
     } catch (err) {
       console.error('Failed to load page:', err);
       setPageLoadError(true);
     }
-
     setIsLoadingMore(false);
   }, [isLoadingMore, totalPages, fetchPageStreaming, fetchPage, prefetchPageBatch]);
 
-  // ── Initial load ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (isTextDoc) return;
     fetchDocumentView().then((hasData) => {
@@ -661,7 +579,7 @@ const Workspace = ({
 
   const bottomRef = useBottomInfiniteScroll(loadNextPage, !isTextDoc && hasMore);
 
-  // ── Text-selection → floating menu ───────────────────────────────────────
+  // ── Text-selection → floating menu ────────────────────────────────────────
   const handleMouseUp = (e) => {
     if (
       e.target.closest('.floating-menu') ||
@@ -670,7 +588,6 @@ const Workspace = ({
       e.target.closest('.note-panel') ||
       e.target.closest('.note-toggle-btn')
     ) return;
-
     setTimeout(() => {
       const selection = window.getSelection();
       const text = selection?.toString().trim();
@@ -678,19 +595,15 @@ const Workspace = ({
         setMenuConfig(prev => ({ ...prev, show: false }));
         return;
       }
-
       const range = selection.getRangeAt(0);
       const rect  = range.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) return;
-
       const wordCount   = text.split(/\s+/).length;
       const isParagraph = wordCount > 10;
-
       const MENU_W = 200, MENU_H = 40, GAP = 10;
       const vw = window.innerWidth, vh = window.innerHeight;
       let rawX = rect.left + rect.width / 2;
       let rawY, placement;
-
       if (isParagraph) {
         const belowFits = rect.bottom + GAP + MENU_H <= vh;
         const aboveFits = rect.top   - GAP - MENU_H >= 0;
@@ -701,10 +614,8 @@ const Workspace = ({
         if (rect.top - GAP - MENU_H >= 0) { rawY = rect.top - GAP; placement = 'above'; }
         else { rawY = rect.bottom + GAP; placement = 'below'; }
       }
-
       const halfMenu = MENU_W / 2 + GAP;
       const clampedX = Math.min(Math.max(rawX, halfMenu), vw - halfMenu);
-
       setSelectedText(text);
       setMenuConfig({
         show: true, x: clampedX, y: rawY, placement,
@@ -730,20 +641,16 @@ const Workspace = ({
     }
   };
 
-  // ── Meaning ───────────────────────────────────────────────────────────────
   const handleMeaningClick = async (e) => {
     e.stopPropagation();
     setMenuConfig(prev => ({ ...prev, show: false }));
     setMeaningPopup({ show: true, x: menuConfig.x, y: menuConfig.y, text: selectedText, result: '', loading: true });
-
     const headers = guardedHeaders();
     if (!headers) return;
-
     try {
       const word = encodeURIComponent(selectedText.trim());
       const res  = await fetch(`${BASE}/dictionary/${word}/meaning`, { headers });
       if (res.status === 401) { onAuthError(); return; }
-
       if (res.ok) {
         const data = await res.json();
         const result = [
@@ -754,7 +661,6 @@ const Workspace = ({
         setMeaningPopup(prev => ({ ...prev, loading: false, result }));
         return;
       }
-
       const ragRes = await fetch(`${RAG_API_URL}/chat`, {
         method: 'POST',
         headers: { ...getRagHeaders(), 'Content-Type': 'application/json' },
@@ -773,7 +679,6 @@ const Workspace = ({
     }
   };
 
-  // ── Summarize ─────────────────────────────────────────────────────────────
   const handleSummaryClick = (e) => { e.stopPropagation(); setLengthPicker(prev => !prev); };
 
   const fireSummarize = async (length) => {
@@ -781,12 +686,9 @@ const Workspace = ({
     setMenuConfig(prev => ({ ...prev, show: false }));
     const capturedText = selectedText;
     setInjectedMessage({ type: 'summary', selectedText: capturedText, length, result: null, id: Date.now() });
-    // On mobile, switch to chat tab after summarizing
     if (isMobile) setMobileTab('chat');
-
     const headers = guardedHeaders();
     if (!headers) return;
-
     try {
       const res = await fetch(`${RAG_API_URL}/summarize`, {
         method: 'POST',
@@ -802,13 +704,10 @@ const Workspace = ({
     }
   };
 
-  // ── Text-to-speech ────────────────────────────────────────────────────────
   const handlePronounce = async (e) => {
     e.stopPropagation();
     setPhonetic('');
-
     if (isSpeaking) { window.speechSynthesis.cancel(); setIsSpeaking(false); return; }
-
     if (menuConfig.type === 'word') {
       const headers = guardedHeaders();
       if (!headers) return;
@@ -827,7 +726,6 @@ const Workspace = ({
         }
       } catch (err) { console.error('Pronunciation API failed:', err); }
     }
-
     const utterance = new SpeechSynthesisUtterance(selectedText);
     utterance.rate    = 0.95;
     utterance.onstart = () => setIsSpeaking(true);
@@ -836,7 +734,6 @@ const Workspace = ({
     window.speechSynthesis.speak(utterance);
   };
 
-  // ── Delete document ───────────────────────────────────────────────────────
   const handleDelete = async () => {
     if (!window.confirm('Delete this document? This cannot be undone.')) return;
     const headers = guardedHeaders();
@@ -848,18 +745,26 @@ const Workspace = ({
     } catch (err) { console.error('Delete failed:', err); }
   };
 
-  // ── Page note helpers ─────────────────────────────────────────────────────
   const toggleNoteSection = (pageNum) => setOpenNotePageNum(prev => (prev === pageNum ? null : pageNum));
   const handleNoteChange  = (pageNum, value) => setPageNotes(prev => ({ ...prev, [pageNum]: value }));
-
   const dirtyCount = dirtyPages.size;
 
-  // ── Sidebar icons (reused on desktop sidebar & mobile top bar) ────────────
+  // ── Theme switcher — defined outside JSX to avoid re-definition issues ────
+  const THEMES = [
+    { id: 'light',   icon: '☀️', title: 'Light mode'   },
+    { id: 'dark',    icon: '🌙', title: 'Dark mode'    },
+    { id: 'reading', icon: '📖', title: 'Reading mode' },
+  ];
+
+  const handleThemeChange = (id) => {
+    setTheme(id);
+  };
+
+  // ── Sidebar actions ───────────────────────────────────────────────────────
   const SidebarActions = ({ className = '' }) => (
     <>
       {!isTextDoc && (
         <>
-          {/* Bulk save */}
           <div className={`relative ${className}`}>
             <button
               onClick={handleBulkSave}
@@ -879,7 +784,6 @@ const Workspace = ({
             </button>
           </div>
 
-          {/* Generate PDF */}
           <button
             onClick={handleGeneratePdf}
             disabled={isGeneratingPdf}
@@ -893,7 +797,6 @@ const Workspace = ({
             )}
           </button>
 
-          {/* View generated PDF */}
           {generatedPdfUrl && (
             <a
               href={generatedPdfUrl}
@@ -912,7 +815,6 @@ const Workspace = ({
         </>
       )}
 
-      {/* Delete */}
       <button
         onClick={handleDelete}
         className={`p-3 text-gray-400 hover:bg-red-50 hover:text-red-500 rounded-xl transition-all ${className}`}
@@ -928,57 +830,37 @@ const Workspace = ({
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div
-      className="flex flex-col md:flex-row h-screen bg-[#F0F2F5] relative overflow-hidden font-sans"
+      className="flex flex-col md:flex-row h-screen relative overflow-hidden font-sans"
+      style={{ background: 'var(--app-bg)', transition: 'background 0.3s, color 0.3s' }}
       onMouseUp={handleMouseUp}
       onMouseDown={handleMouseDown}
     >
+
       {/* ── FLOATING SELECTION MENU ── */}
       {menuConfig.show && (
         <>
           {phonetic && (
-            <div
-              style={{
-                position:      'fixed',
-                zIndex:        10000,
-                top:           menuConfig.placement === 'below'
-                  ? `${menuConfig.y + 44}px`
-                  : `${menuConfig.y - 44}px`,
-                left:          `${menuConfig.x}px`,
-                transform:     'translateX(-50%)',
-                background:    '#2d2d2d',
-                color:         '#a5f3fc',
-                fontSize:      '15px',
-                fontFamily:    'serif',
-                letterSpacing: '0.05em',
-                padding:       '5px 14px',
-                borderRadius:  '20px',
-                border:        '1px solid #444',
-                boxShadow:     '0 2px 12px rgba(0,0,0,0.4)',
-                pointerEvents: 'none',
-                whiteSpace:    'nowrap',
-              }}
-            >
+            <div style={{
+              position: 'fixed', zIndex: 10000,
+              top: menuConfig.placement === 'below' ? `${menuConfig.y + 44}px` : `${menuConfig.y - 44}px`,
+              left: `${menuConfig.x}px`, transform: 'translateX(-50%)',
+              background: '#2d2d2d', color: '#a5f3fc', fontSize: '15px',
+              fontFamily: 'serif', letterSpacing: '0.05em', padding: '5px 14px',
+              borderRadius: '20px', border: '1px solid #444',
+              boxShadow: '0 2px 12px rgba(0,0,0,0.4)', pointerEvents: 'none', whiteSpace: 'nowrap',
+            }}>
               {phonetic}
             </div>
           )}
-
           <div
             className="floating-menu"
             style={{
-              position:  'fixed',
-              zIndex:    9999,
-              top:       `${menuConfig.y}px`,
-              left:      `${menuConfig.x}px`,
-              transform: menuConfig.placement === 'below'
-                ? 'translateX(-50%)'
-                : 'translateX(-50%) translateY(-100%)',
-              background:   '#1a1a1a',
-              color:        '#fff',
-              borderRadius: '8px',
-              display:      'flex',
-              overflow:     'hidden',
-              boxShadow:    '0 4px 20px rgba(0,0,0,0.3)',
-              border:       '1px solid #333',
+              position: 'fixed', zIndex: 9999,
+              top: `${menuConfig.y}px`, left: `${menuConfig.x}px`,
+              transform: menuConfig.placement === 'below' ? 'translateX(-50%)' : 'translateX(-50%) translateY(-100%)',
+              background: '#1a1a1a', color: '#fff', borderRadius: '8px',
+              display: 'flex', overflow: 'hidden',
+              boxShadow: '0 4px 20px rgba(0,0,0,0.3)', border: '1px solid #333',
             }}
             onMouseUp={(e) => e.stopPropagation()}
             onMouseDown={(e) => e.stopPropagation()}
@@ -1035,121 +917,179 @@ const Workspace = ({
       {/* ── MEANING POPUP ── */}
       {meaningPopup.show && (
         <div
-          className="meaning-popup fixed z-[9998] w-[280px] bg-gray-50 rounded-2xl border border-gray-200 shadow-lg overflow-hidden"
+          className="meaning-popup fixed z-[9998] w-[280px] rounded-2xl border shadow-lg overflow-hidden"
           style={{
-            left:      `${Math.min(meaningPopup.x, window.innerWidth - 150)}px`,
-            top:       `${meaningPopup.y}px`,
+            left: `${Math.min(meaningPopup.x, window.innerWidth - 150)}px`,
+            top: `${meaningPopup.y}px`,
             transform: 'translateX(-50%) translateY(-100%) translateY(-12px)',
+            background: 'var(--page-bg)',
+            borderColor: 'var(--page-border)',
           }}
           onMouseDown={(e) => e.stopPropagation()}
           onMouseUp={(e) => e.stopPropagation()}
         >
-          <div className="px-4 pt-3.5 pb-0 bg-white border-b border-gray-200 flex items-end justify-between">
+          <div className="px-4 pt-3.5 pb-0 flex items-end justify-between"
+            style={{ background: 'var(--page-bg)', borderBottom: '1px solid var(--page-border)' }}>
             <div className="flex items-center gap-2 pb-1 -mb-px">
               <svg className="w-[14px] h-[14px] text-indigo-400 shrink-0 mb-[1px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
               </svg>
-              <span className="text-[15px] font-semibold text-gray-900 leading-none">{meaningPopup.text}</span>
+              <span className="text-[15px] font-semibold leading-none" style={{ color: 'var(--page-text)' }}>{meaningPopup.text}</span>
             </div>
             <button
               onClick={() => setMeaningPopup(prev => ({ ...prev, show: false }))}
-              className="text-gray-400 hover:text-gray-600 text-lg pb-1 -mb-px leading-none bg-transparent border-0 cursor-pointer transition-colors"
+              className="text-lg pb-1 -mb-px leading-none bg-transparent border-0 cursor-pointer transition-colors"
+              style={{ color: 'var(--muted-text)' }}
             >×</button>
           </div>
-
           <div className="px-4 py-3">
             {meaningPopup.loading ? (
               <div className="flex flex-col gap-2">
                 {[100, 75, 50].map((w, i) => (
-                  <div key={i} className="h-[11px] bg-gray-200 rounded animate-pulse" style={{ width: `${w}%` }} />
+                  <div key={i} className="h-[11px] rounded animate-pulse" style={{ width: `${w}%`, background: 'var(--page-border)' }} />
                 ))}
               </div>
             ) : (
               <div>
-                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.07em] mb-0.5">Definition</p>
-                <p className="text-[13px] leading-[1.65] text-gray-900 mb-2.5">{meaningPopup.result.split('\n')[0]}</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.07em] mb-0.5" style={{ color: 'var(--muted-text)' }}>Definition</p>
+                <p className="text-[13px] leading-[1.65] mb-2.5" style={{ color: 'var(--page-text)' }}>{meaningPopup.result.split('\n')[0]}</p>
                 {meaningPopup.result.split('\n').slice(1).map((line, i) => {
                   const colonIdx = line.indexOf(': ');
                   const label    = colonIdx !== -1 ? line.slice(0, colonIdx) : line;
                   const value    = colonIdx !== -1 ? line.slice(colonIdx + 2) : '';
                   return (
                     <div key={i} className="mt-2">
-                      <span className="block text-[10px] font-bold text-gray-400 uppercase tracking-[0.07em] mb-0.5">{label}</span>
-                      <span className={`text-[13px] text-gray-600 leading-relaxed ${label.toLowerCase() === 'example' ? 'italic' : ''}`}>{value}</span>
+                      <span className="block text-[10px] font-bold uppercase tracking-[0.07em] mb-0.5" style={{ color: 'var(--muted-text)' }}>{label}</span>
+                      <span className={`text-[13px] leading-relaxed ${label.toLowerCase() === 'example' ? 'italic' : ''}`} style={{ color: 'var(--page-text)' }}>{value}</span>
                     </div>
                   );
                 })}
               </div>
             )}
           </div>
-
-          <div className="absolute -bottom-[7px] left-1/2 -translate-x-1/2 w-0 h-0"
-            style={{ borderLeft: '7px solid transparent', borderRight: '7px solid transparent', borderTop: '7px solid #e5e7eb' }} />
-          <div className="absolute -bottom-[6px] left-1/2 -translate-x-1/2 w-0 h-0"
-            style={{ borderLeft: '6px solid transparent', borderRight: '6px solid transparent', borderTop: '6px solid #f9fafb' }} />
         </div>
       )}
 
       {/* ── MOBILE TOP BAR ── */}
-      <header className="md:hidden flex items-center gap-2 px-3 py-2 bg-white border-b border-gray-200 shrink-0 z-20">
-        <button onClick={handleBack} className="p-2 text-gray-500 hover:bg-gray-100 rounded-xl transition-all" title="Back">
+      <header
+        className="md:hidden flex items-center gap-2 px-3 py-2 shrink-0 z-20"
+        style={{ background: 'var(--sidebar-bg)', borderBottom: '1px solid var(--sidebar-border)' }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <button onClick={handleBack} className="p-2 rounded-xl transition-all" style={{ color: 'var(--muted-text)' }} title="Back">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
         </button>
 
-        {/* Page indicator */}
         {!isTextDoc && totalPages > 0 && (
-          <span className="text-xs text-gray-500 font-medium">
+          <span className="text-xs font-medium" style={{ color: 'var(--muted-text)' }}>
             {currentPage > 0 ? `${currentPage}/${totalPages}` : `0/${totalPages}`}
           </span>
         )}
 
-        {/* Doc name */}
         <div className="flex-1 min-w-0 mx-1">
           {(docMeta?.filename || documentName) && (
-            <p className="text-xs font-medium text-gray-700 truncate">
+            <p className="text-xs font-medium truncate" style={{ color: 'var(--page-text)' }}>
               {docMeta?.filename || documentName}
             </p>
           )}
         </div>
 
-        {/* Action buttons */}
         <div className="flex items-center">
           <SidebarActions />
         </div>
 
-        {/* Tab switcher */}
-        <div className="flex bg-gray-100 rounded-xl p-0.5">
-          <button
-            onClick={() => setMobileTab('doc')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${mobileTab === 'doc' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'}`}
-          >
-            Doc
-          </button>
-          <button
-            onClick={() => setMobileTab('chat')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${mobileTab === 'chat' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'}`}
-          >
-            Chat
-          </button>
+        {/* Mobile theme toggle */}
+        <div className="flex items-center gap-0.5">
+          {THEMES.map(({ id, icon, title }) => (
+            <button
+              key={id}
+              title={title}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => handleThemeChange(id)}
+              style={{
+                fontSize: 16,
+                padding: '6px',
+                borderRadius: '10px',
+                border: 'none',
+                cursor: 'pointer',
+                background: theme === id ? 'rgba(99,102,241,0.2)' : 'transparent',
+                outline: theme === id ? '1.5px solid rgba(99,102,241,0.5)' : 'none',
+                transition: 'all 0.2s',
+              }}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex rounded-xl p-0.5" style={{ background: 'var(--page-border)' }}>
+          {['doc', 'chat'].map(tab => (
+            <button
+              key={tab}
+              onClick={() => setMobileTab(tab)}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all capitalize"
+              style={{
+                background: mobileTab === tab ? 'var(--page-bg)' : 'transparent',
+                color:      mobileTab === tab ? 'var(--page-text)' : 'var(--muted-text)',
+              }}
+            >
+              {tab}
+            </button>
+          ))}
         </div>
       </header>
 
       {/* ── DESKTOP SIDEBAR ── */}
-      <aside className="hidden md:flex w-16 bg-white border-r border-gray-200 flex-col items-center py-6 shrink-0 z-20">
-        {/* Back */}
-        <button onClick={handleBack} className="p-3 mb-4 text-gray-500 hover:bg-gray-100 hover:text-gray-900 rounded-xl transition-all" title="Back to Dashboard">
+      <aside
+        className="hidden md:flex w-16 flex-col items-center py-6 shrink-0 z-20"
+        style={{ background: 'var(--sidebar-bg)', borderRight: '1px solid var(--sidebar-border)', transition: 'background 0.3s' }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <button
+          onClick={handleBack}
+          className="p-3 mb-2 rounded-xl transition-all"
+          style={{ color: 'var(--muted-text)' }}
+          title="Back to Dashboard"
+        >
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
         </button>
 
-        <div className="w-8 h-px bg-gray-200 my-2" />
+        <div className="w-8 h-px my-2" style={{ background: 'var(--sidebar-border)' }} />
+
+        {/* Desktop theme toggle */}
+        <div className="flex flex-col items-center gap-1 mb-2">
+          {THEMES.map(({ id, icon, title }) => (
+            <button
+              key={id}
+              title={title}
+              onClick={() => handleThemeChange(id)}
+              style={{
+                fontSize: 18,
+                padding: '8px',
+                borderRadius: '12px',
+                border: 'none',
+                cursor: 'pointer',
+                background: theme === id ? 'rgba(99,102,241,0.2)' : 'transparent',
+                outline: theme === id ? '1.5px solid rgba(99,102,241,0.5)' : 'none',
+                transition: 'all 0.2s',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+
+        <div className="w-8 h-px my-2" style={{ background: 'var(--sidebar-border)' }} />
 
         {!isTextDoc && (
           <>
-            {/* Bulk save */}
             <div className="relative">
               <button
                 onClick={handleBulkSave}
@@ -1169,7 +1109,6 @@ const Workspace = ({
               )}
             </div>
 
-            {/* Generate PDF */}
             <button
               onClick={handleGeneratePdf}
               disabled={isGeneratingPdf}
@@ -1185,7 +1124,7 @@ const Workspace = ({
 
             {generatedPdfUrl && (
               <>
-                <div className="w-8 h-px bg-gray-100 my-1" />
+                <div className="w-8 h-px my-1" style={{ background: 'var(--sidebar-border)' }} />
                 <a
                   href={generatedPdfUrl}
                   target="_blank"
@@ -1207,7 +1146,6 @@ const Workspace = ({
           </>
         )}
 
-        {/* Delete */}
         <button
           onClick={handleDelete}
           className="p-3 mt-auto text-gray-400 hover:bg-red-50 hover:text-red-500 rounded-xl transition-all"
@@ -1222,7 +1160,7 @@ const Workspace = ({
       {/* ── MAIN CONTENT AREA ── */}
       <main className="flex-1 flex flex-col md:flex-row h-full md:h-screen relative min-w-0 overflow-hidden">
 
-        {/* ── DOCUMENT COLUMN — hidden on mobile when chat tab active ── */}
+        {/* ── DOCUMENT COLUMN ── */}
         <div className={`
           flex-1 flex flex-col relative overflow-hidden min-w-0
           ${isMobile && mobileTab === 'chat' ? 'hidden' : 'flex'}
@@ -1233,8 +1171,9 @@ const Workspace = ({
           <header className="hidden md:flex absolute top-8 left-0 right-0 z-10 px-0 py-4 pointer-events-none justify-between items-center">
             <div className="flex items-center gap-2 pointer-events-auto">
               {(docMeta?.filename || documentName || documentCategory) && (
-                <div className="bg-white/90 backdrop-blur-sm border border-gray-200 shadow-sm px-3 py-1.5 rounded-full">
-                  <span className="text-xs font-medium text-gray-500">
+                <div className="backdrop-blur-sm shadow-sm px-3 py-1.5 rounded-full"
+                  style={{ background: 'var(--page-bg)', border: '1px solid var(--page-border)' }}>
+                  <span className="text-xs font-medium" style={{ color: 'var(--muted-text)' }}>
                     {documentCategory === 'text' ? '📄' : '🔍'}{' '}
                     {docMeta?.filename || documentName || (documentCategory === 'text' ? 'Digital document' : 'Scanned document')}
                   </span>
@@ -1246,10 +1185,10 @@ const Workspace = ({
                 </div>
               )}
             </div>
-
-            <div className="bg-white/90 backdrop-blur-sm border border-gray-200 shadow-sm px-4 py-1.5 rounded-full pointer-events-auto flex items-center gap-3 ml-auto">
+            <div className="backdrop-blur-sm shadow-sm px-4 py-1.5 rounded-full pointer-events-auto flex items-center gap-3 ml-auto"
+              style={{ background: 'var(--page-bg)', border: '1px solid var(--page-border)' }}>
               {!isTextDoc && totalPages > 0 && (
-                <span className="text-xs font-medium text-gray-600">
+                <span className="text-xs font-medium" style={{ color: 'var(--page-text)' }}>
                   {currentPage > 0 ? `Page ${currentPage} of ${totalPages}` : `0 of ${totalPages}`}
                 </span>
               )}
@@ -1258,7 +1197,7 @@ const Workspace = ({
             </div>
           </header>
 
-          {/* Mobile streaming/loading indicator */}
+          {/* Mobile streaming indicator */}
           {isMobile && (streamingPage || isLoadingMore) && (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 border-b border-blue-100">
               <Spinner size="w-3 h-3" color="border-t-blue-500" />
@@ -1318,9 +1257,7 @@ const Workspace = ({
                   <svg className="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
-                  <span className="text-xs font-medium text-green-800">
-                    OCR formatting complete — text quality improved
-                  </span>
+                  <span className="text-xs font-medium text-green-800">OCR formatting complete — text quality improved</span>
                   {fmtSummary.failed > 0 && (
                     <button onClick={handleReformat} className="ml-auto text-[10px] text-red-500 hover:underline">
                       Retry {fmtSummary.failed} failed
@@ -1338,30 +1275,33 @@ const Workspace = ({
           <div
             ref={scrollRef}
             className="flex-1 overflow-y-auto pb-20 scroll-smooth"
-            style={{ maxHeight: '100%' }}
+            style={{ maxHeight: '100%', background: 'var(--app-bg)', transition: 'background 0.3s' }}
           >
             {isTextDoc ? (
               pdfUrl ? (
-                <PdfViewer
-                  pdfUrl={pdfUrl}
-                  pageNotes={pageNotes}
-                  onNoteChange={handleNoteChange}
-                  openNotePageNum={openNotePageNum}
-                  onToggleNote={toggleNoteSection}
-                  onPageChange={(pageNum) => setCurrentPage(pageNum)}
-                  onNoteSave={saveNote}
-                />
+                <div style={{ height: '100%' }}>
+                  <PdfViewer
+                    pdfUrl={pdfUrl}
+                    theme={theme}
+                    pageNotes={pageNotes}
+                    onNoteChange={handleNoteChange}
+                    openNotePageNum={openNotePageNum}
+                    onToggleNote={toggleNoteSection}
+                    onPageChange={(pageNum) => setCurrentPage(pageNum)}
+                    onNoteSave={saveNote}
+                  />
+                </div>
               ) : (
                 <div className="flex items-center justify-center h-full">
                   <Spinner size="w-8 h-8" color="border-t-gray-600" />
                 </div>
               )
             ) : (
-            // AFTER
-<div className="flex flex-col items-center px-0 sm:px-6 space-y-6 sm:space-y-8 pt-4 md:pt-20">
+              <div className="flex flex-col items-center px-0 sm:px-6 space-y-6 sm:space-y-8 pt-4 md:pt-20">
                 {pages.map((page) => (
                   <div key={page.page_number} className="relative group transition-transform duration-300 w-full flex flex-col items-center">
-                    <div className="absolute -left-3 sm:-left-5 top-0 text-xs text-gray-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="absolute -left-3 sm:-left-5 top-0 text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                      style={{ color: 'var(--muted-text)' }}>
                       p.{page.page_number}
                     </div>
 
@@ -1369,31 +1309,37 @@ const Workspace = ({
                       <div className="absolute -right-1 sm:-right-3 top-3 w-2 h-2 bg-blue-400 rounded-full" title="Unsaved changes" />
                     )}
 
-                    {/* PAGE CARD — responsive width */}
                     <div
                       ref={(el) => { if (el) pageRefs.current[page.page_number] = el; }}
-                      className="bg-white w-full  shadow-sm hover:shadow-md transition-shadow duration-300 border border-gray-200/60 relative"
-                      style={{ userSelect: 'text', WebkitUserSelect: 'text', overflow: 'visible' }}
+                      className="w-full shadow-sm hover:shadow-md transition-shadow duration-300 relative"
+                      style={{
+                        background: 'var(--page-bg)',
+                        border: '0.5px solid var(--page-border)',
+                        color: 'var(--page-text)',
+                        transition: 'background 0.3s, border-color 0.3s',
+                      }}
                     >
                       <div
                         contentEditable
                         suppressContentEditableWarning
-                        className="w-full h-full p-4 sm:p-[25mm] sm:pb-[15mm] outline-none text-[11pt] sm:text-[12pt] leading-[1.8] text-gray-800 font-serif text-justify selection:bg-blue-100 selection:text-blue-900 whitespace-pre-wrap empty:before:content-['Start_typing...'] empty:before:text-gray-300"
-                       style={{ minHeight: 'auto' }}
-                        onInput={(e) => setDirtyPages(prev => new Set(prev).add(page.page_number))}
+                        className="w-full h-full p-4 sm:p-[25mm] sm:pb-[15mm] outline-none text-[11pt] sm:text-[12pt] leading-[1.8] font-serif text-justify whitespace-pre-wrap empty:before:content-['Start_typing...'] empty:before:text-gray-300"
+                        style={{ minHeight: 'auto', color: 'var(--page-text)', caretColor: 'var(--muted-text)' }}
+                        onInput={() => setDirtyPages(prev => new Set(prev).add(page.page_number))}
                         onBlur={(e) => handleContentChange(page.page_number, e.currentTarget.innerText)}
                       >
                         {page.extracted_text || ''}
                       </div>
 
                       {page._streaming && (
-                        <div className="absolute top-4 right-4 flex items-center gap-1.5 bg-white/80 backdrop-blur-sm px-2 py-1 rounded-full border border-gray-200">
+                        <div className="absolute top-4 right-4 flex items-center gap-1.5 backdrop-blur-sm px-2 py-1 rounded-full"
+                          style={{ background: 'var(--page-bg)', border: '1px solid var(--page-border)' }}>
                           <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" />
-                          <span className="text-[10px] text-gray-400 font-medium">Loading…</span>
+                          <span className="text-[10px] font-medium" style={{ color: 'var(--muted-text)' }}>Loading…</span>
                         </div>
                       )}
 
-                      <div className="border-t border-gray-100 flex items-center justify-center px-4 py-2.5 bg-white">
+                      <div className="flex items-center justify-center px-4 py-2.5"
+                        style={{ borderTop: '1px solid var(--page-border)', background: 'var(--page-bg)' }}>
                         <CenteredNoteButton
                           hasNote={!!pageNotes[page.page_number]}
                           isOpen={openNotePageNum === page.page_number}
@@ -1416,7 +1362,7 @@ const Workspace = ({
 
                 {pageLoadError && !isLoadingMore && (
                   <div className="flex flex-col items-center gap-3 py-8 text-center w-full max-w-[210mm]">
-                    <p className="text-sm text-gray-500">Failed to load page. The document may still be processing.</p>
+                    <p className="text-sm" style={{ color: 'var(--muted-text)' }}>Failed to load page. The document may still be processing.</p>
                     <button
                       onClick={() => { setPageLoadError(false); loadNextPage(); }}
                       className="px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 transition-colors"
@@ -1427,12 +1373,13 @@ const Workspace = ({
                 )}
 
                 {isLoadingMore && (
-                  <div className="bg-white w-full max-w-[210mm] shadow-sm border border-gray-200 p-6 sm:p-[25mm] space-y-6 animate-pulse" style={{ minHeight: '40vw' }}>
-                    <div className="h-4 bg-gray-100 rounded w-full" />
-                    <div className="h-4 bg-gray-100 rounded w-full" />
-                    <div className="h-4 bg-gray-100 rounded w-5/6" />
-                    <div className="h-4 bg-gray-100 rounded w-full" />
-                    <div className="h-32 bg-gray-50 rounded w-full mt-8" />
+                  <div className="w-full max-w-[210mm] shadow-sm p-6 sm:p-[25mm] space-y-6 animate-pulse"
+                    style={{ background: 'var(--page-bg)', border: '0.5px solid var(--page-border)', minHeight: '40vw' }}>
+                    <div className="h-4 rounded w-full" style={{ background: 'var(--page-border)' }} />
+                    <div className="h-4 rounded w-full" style={{ background: 'var(--page-border)' }} />
+                    <div className="h-4 rounded w-5/6" style={{ background: 'var(--page-border)' }} />
+                    <div className="h-4 rounded w-full" style={{ background: 'var(--page-border)' }} />
+                    <div className="h-32 rounded w-full mt-8" style={{ background: 'var(--page-border)' }} />
                   </div>
                 )}
 
@@ -1447,15 +1394,15 @@ const Workspace = ({
           </div>
         </div>
 
-        {/* ── CHAT PANEL — full screen on mobile when active, fixed width on desktop ── */}
+        {/* ── CHAT PANEL ── */}
         <div className={`
           ${isMobile
             ? `${mobileTab === 'chat' ? 'flex' : 'hidden'} w-full`
-            : 'flex shrink-0 border-l border-gray-200'
+            : 'flex shrink-0 border-l'
           }
           chat-panel relative self-stretch
         `}
-          style={isMobile ? {} : { width: 520, minWidth: 520, maxWidth: 520 }}
+          style={isMobile ? {} : { width: 520, minWidth: 520, maxWidth: 520, borderColor: 'var(--sidebar-border)' }}
         >
           <ChatPanel
             documentId={documentId}

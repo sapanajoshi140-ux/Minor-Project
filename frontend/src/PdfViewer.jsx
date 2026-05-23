@@ -7,66 +7,129 @@ import { CenteredNoteButton, FloatingNotePanel } from './NoteSection';
 const PDFJS_VERSION = '3.4.120';
 const PDFJS_CDN = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}`;
 
-// ── Render text layer: one span per item, exact pdf.js transform logic ──────
+// ── Text layer: line-grouped spans with non-overlapping vertical bounds ─────
+//
+// THE CORE PROBLEM with fixed height/top:
+//   Every span gets top = baselineY - (fontHeight * ascenderRatio) and
+//   height = fontHeight. But line-spacing in PDFs is usually 120-140% of
+//   fontHeight, so the span's bottom (baseline + descender) overlaps the
+//   whitespace above the NEXT line's span top. When the cursor enters that
+//   overlap zone, the browser hits the wrong line's spans.
+//
+// FIX — compute height from actual line spacing:
+//   1. Parse all items, compute their baseline Y.
+//   2. Group items that share the same baseline (same line).
+//   3. Sort lines top-to-bottom.
+//   4. Each line's span height = gap to the NEXT line's baseline (capped at
+//      fontHeight * 1.5 for the last line). This guarantees zero vertical
+//      overlap between lines — the spans tile perfectly with no gaps or overlaps.
+//
 const renderTextLayer = async (textLayer, page, viewport) => {
   textLayer.innerHTML = '';
-  textLayer.style.width = `${viewport.width}px`;
-  textLayer.style.height = `${viewport.height}px`;
+  const { items } = await page.getTextContent();
+  const fragment = document.createDocumentFragment();
 
-  const textContent = await page.getTextContent();
-
-  for (const item of textContent.items) {
+  // ── 1. Compute transformed data for every item ───────────────────────────
+  const parsed = [];
+  for (const item of items) {
+    if (!item.str) continue;
     const tx = window.pdfjsLib.Util.transform(viewport.transform, item.transform);
-
     const fontHeight = Math.hypot(tx[0], tx[1]);
-    const fontWidth = Math.hypot(tx[2], tx[3]);
-    const fontSize = fontHeight;
+    if (fontHeight < 1) continue;
 
-    const left = tx[4];
-    const top = tx[5] - fontSize;
+    const baselineX  = tx[4];
+    const baselineY  = tx[5];
+    const pdfWidthPx = (item.width ?? 0) * viewport.scale;
+    const spanWidth  = pdfWidthPx > 2 ? pdfWidthPx : fontHeight * 0.5;
 
-    const span = document.createElement('span');
-    span.style.cssText = `
-      position: absolute;
-      left: ${left}px;
-      top: ${top}px;
-      font-size: ${fontSize}px;
-      font-family: sans-serif;
-      transform: scaleX(${fontWidth / fontHeight || 1});
-      transform-origin: 0% 0%;
-      white-space: pre;
-      cursor: text;
-      color: transparent;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      user-select: text;
-      pointer-events: auto;
-    `;
-    span.textContent = item.str;
-    textLayer.appendChild(span);
+    parsed.push({ str: item.str, baselineX, baselineY, fontHeight, spanWidth });
   }
+
+  if (parsed.length === 0) return;
+
+  // ── 2. Group by baseline Y (round to 1 decimal to merge same-line items) ─
+  const lineMap = new Map();
+  for (const p of parsed) {
+    const key = Math.round(p.baselineY * 10) / 10;
+    if (!lineMap.has(key)) lineMap.set(key, []);
+    lineMap.get(key).push(p);
+  }
+
+  // ── 3. Sort lines top→bottom (ascending Y in CSS coords) ─────────────────
+  const sortedBaselines = [...lineMap.keys()].sort((a, b) => a - b);
+
+  // ── 4. For each line, height = distance to next line's baseline ───────────
+  //       This makes spans tile perfectly — zero overlap, zero gap.
+  for (let i = 0; i < sortedBaselines.length; i++) {
+    const baseline     = sortedBaselines[i];
+    const nextBaseline = sortedBaselines[i + 1];
+    const lineItems    = lineMap.get(baseline);
+
+    // Representative font size for this line
+    const fontHeight = lineItems.reduce((m, p) => Math.max(m, p.fontHeight), 0);
+
+    // Height: gap to next line, capped so we don't over-extend on last line
+    // or on lines with huge spacing (e.g. after headings).
+    // Minimum = fontHeight * 0.8 so short lines are still clickable.
+    let spanHeight;
+    if (nextBaseline !== undefined) {
+      const gap = nextBaseline - baseline;
+      // clamp: at least 80% of fontHeight, at most 140% (ignore huge paragraph gaps)
+      spanHeight = Math.min(Math.max(gap, fontHeight * 0.8), fontHeight * 1.4);
+    } else {
+      spanHeight = fontHeight * 1.1; // last line: just cap + small descender
+    }
+
+    // Top of the span = baseline minus ascender (80% of fontHeight).
+    // Using 80% instead of 100% leaves a small gap above cap-height so
+    // moving the cursor above the line doesn't accidentally grab it.
+    const ascender = fontHeight * 0.80;
+    const top = baseline - ascender;
+
+    for (const p of lineItems) {
+      const span = document.createElement('span');
+      span.textContent = p.str;
+      span.style.cssText = `
+        position:               absolute;
+        left:                   ${p.baselineX}px;
+        top:                    ${top}px;
+        width:                  ${p.spanWidth}px;
+        height:                 ${spanHeight}px;
+        font-size:              ${p.fontHeight}px;
+        font-family:            sans-serif;
+        line-height:            1;
+        white-space:            pre;
+        overflow:               hidden;
+        color:                  transparent;
+        -webkit-text-fill-color:transparent;
+        background:             transparent;
+        text-shadow:            none;
+        text-decoration:        none;
+        cursor:                 text;
+        user-select:            text;
+        -webkit-user-select:    text;
+        pointer-events:         auto;
+      `;
+      fragment.appendChild(span);
+    }
+  }
+
+  textLayer.appendChild(fragment);
 };
 
 // ── Single rendered page ──────────────────────────────────────────────────────
 const PdfPage = ({
-  pdf,
-  pageNum,
-  containerWidth,
-  onVisible,
-  noteContent,
-  onNoteChange,
-  isNoteOpen,
-  onToggleNote,
-  onNoteSave,
+  pdf, pageNum, containerWidth, onVisible,
+  noteContent, onNoteChange, isNoteOpen, onToggleNote, onNoteSave,
 }) => {
-  const canvasRef = useRef(null);
-  const textLayerRef = useRef(null);
+  const canvasRef     = useRef(null);
+  const textLayerRef  = useRef(null);
   const renderTaskRef = useRef(null);
-  const [rendered, setRendered] = useState(false);
+  const [rendered, setRendered]   = useState(false);
   const [rendering, setRendering] = useState(false);
-
-  const wrapperRef = useIntersectionVisible(pageNum, onVisible);
+  const wrapperRef  = useIntersectionVisible(pageNum, onVisible);
   const hasRendered = useRef(false);
+  const lastWidth   = useRef(0);
 
   useEffect(() => {
     if (!wrapperRef.current) return;
@@ -77,45 +140,54 @@ const PdfPage = ({
           renderPage();
         }
       },
-      { threshold: 0.3 }
+      { threshold: 0.1 }
     );
     observer.observe(wrapperRef.current);
     return () => observer.disconnect();
   }, [rendering]);
 
   const renderPage = useCallback(async () => {
-    const canvas = canvasRef.current;
+    const canvas    = canvasRef.current;
     const textLayer = textLayerRef.current;
     if (!pdf || !canvas) return;
+    if (containerWidth === lastWidth.current && rendered) return;
 
-    if (renderTaskRef.current) {
-      renderTaskRef.current.cancel();
-      renderTaskRef.current = null;
-    }
-
+    renderTaskRef.current?.cancel();
+    renderTaskRef.current = null;
     setRendering(true);
+
     try {
       const page = await pdf.getPage(pageNum);
 
-      // Dynamic scale: fit page to container width
-      const unscaledViewport = page.getViewport({ scale: 1 });
-      const scale = containerWidth / unscaledViewport.width;
-      const viewport = page.getViewport({ scale });
+      const dpr         = window.devicePixelRatio || 1;
+      const unscaled    = page.getViewport({ scale: 1 });
+      const cssScale    = containerWidth / unscaled.width;
 
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+      // Canvas renders at physical pixels (HiDPI sharp)
+      const renderVP = page.getViewport({ scale: cssScale * dpr });
+      // Text layer uses CSS pixels (coordinates match layout)
+      const cssVP    = page.getViewport({ scale: cssScale });
+
+      canvas.width        = renderVP.width;
+      canvas.height       = renderVP.height;
+      canvas.style.width  = `${containerWidth}px`;
+      canvas.style.height = `${cssVP.height}px`;
+
+      if (textLayer) {
+        textLayer.style.width  = `${cssVP.width}px`;
+        textLayer.style.height = `${cssVP.height}px`;
+      }
 
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      const task = page.render({ canvasContext: ctx, viewport });
+      const task = page.render({ canvasContext: ctx, viewport: renderVP });
       renderTaskRef.current = task;
       await task.promise;
 
-      if (textLayer) {
-        await renderTextLayer(textLayer, page, viewport);
-      }
+      if (textLayer) await renderTextLayer(textLayer, page, cssVP);
 
+      lastWidth.current = containerWidth;
       setRendered(true);
     } catch (err) {
       if (err?.name !== 'RenderingCancelledException') {
@@ -126,10 +198,8 @@ const PdfPage = ({
     }
   }, [pdf, pageNum, containerWidth]);
 
-  // Re-render when container width changes
   useEffect(() => {
-    if (hasRendered.current && containerWidth > 0) {
-      hasRendered.current = false;
+    if (hasRendered.current && containerWidth > 0 && containerWidth !== lastWidth.current) {
       renderPage();
     }
   }, [containerWidth, renderPage]);
@@ -150,10 +220,10 @@ const PdfPage = ({
 
         <div
           className="bg-white shadow-sm hover:shadow-md transition-shadow duration-300 border border-gray-200/60 relative"
-          style={{ 
-            width: rendered ? `${containerWidth}px` : `${containerWidth}px`,
+          style={{
+            width:     `${containerWidth}px`,
             minHeight: rendered ? undefined : `${containerWidth * 1.414}px`,
-            overflow: 'hidden'
+            overflow:  'hidden',
           }}
         >
           {!rendered && <PageSkeleton />}
@@ -161,21 +231,21 @@ const PdfPage = ({
           <canvas
             ref={canvasRef}
             className="block"
-            style={{ 
-              width: `${containerWidth}px`,
-              height: 'auto',
-              pointerEvents: 'none'
-            }}
+            style={{ pointerEvents: 'none', display: 'block' }}
           />
 
           <div
             ref={textLayerRef}
-            className="absolute top-0 left-0 overflow-hidden select-text"
-            style={{ 
-              pointerEvents: 'auto', 
-              zIndex: 2,
-              width: `${containerWidth}px`,
-              height: '100%'
+            className="pdf-text-layer"
+            style={{
+              position:         'absolute',
+              top:              0,
+              left:             0,
+              overflow:         'hidden',
+              pointerEvents:    'auto',
+              userSelect:       'text',
+              WebkitUserSelect: 'text',
+              zIndex:           2,
             }}
           />
 
@@ -210,23 +280,19 @@ const PdfPage = ({
 
 // ── Main PdfViewer ────────────────────────────────────────────────────────────
 const PdfViewer = ({
-  pdfUrl,
-  onPageChange,
-  pageNotes,
-  onNoteChange,
-  openNotePageNum,
-  onToggleNote,
-  onNoteSave,
+  pdfUrl, onPageChange, pageNotes, onNoteChange,
+  openNotePageNum, onToggleNote, onNoteSave,
 }) => {
-  const [ready, setReady] = useState(false);
-  const [error, setError] = useState(null);
-  const [totalPages, setTotalPages] = useState(0);
-  const [currentPage, setCurrentPage] = useState(1);
+  const [ready, setReady]               = useState(false);
+  const [error, setError]               = useState(null);
+  const [totalPages, setTotalPages]     = useState(0);
+  const [currentPage, setCurrentPage]   = useState(1);
   const [containerWidth, setContainerWidth] = useState(860);
-  const pdfDocRef = useRef(null);
-  const scrollRef = useRef(null);
+  const [padding, setPadding]           = useState(48);
+  const pdfDocRef    = useRef(null);
+  const scrollRef    = useRef(null);
   const containerRef = useRef(null);
-  const [padding, setPadding] = useState(48);
+
   useEffect(() => {
     loadScript(`${PDFJS_CDN}/pdf.min.js`)
       .then(() => {
@@ -236,28 +302,25 @@ const PdfViewer = ({
       .catch(() => setError('Failed to load PDF.js'));
   }, []);
 
-  // Measure container width
   useEffect(() => {
     const measure = () => {
-  if (containerRef.current) {
-    const totalWidth = containerRef.current.clientWidth;
-    const p = totalWidth < 640 ? 16 : 48;
-    setPadding(p);
-    setContainerWidth(Math.max(totalWidth - p * 2, 280));
-  }
-
+      if (containerRef.current) {
+        const totalWidth = containerRef.current.clientWidth;
+        const p = totalWidth < 640 ? 16 : 48;
+        setPadding(p);
+        setContainerWidth(Math.max(totalWidth - p * 2, 280));
+      }
     };
     measure();
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
+    const ro = new ResizeObserver(measure);
+    if (containerRef.current) ro.observe(containerRef.current);
+    return () => ro.disconnect();
   }, []);
 
   useEffect(() => {
     if (!ready || !pdfUrl) return;
-
     const token =
-      new URL(pdfUrl, window.location.href).searchParams.get('token') ||
-      getToken();
+      new URL(pdfUrl, window.location.href).searchParams.get('token') || getToken();
 
     window.pdfjsLib
       .getDocument({
@@ -277,12 +340,7 @@ const PdfViewer = ({
         setError('Failed to load PDF. Please try again.');
       });
 
-    return () => {
-      if (pdfDocRef.current) {
-        pdfDocRef.current.destroy();
-        pdfDocRef.current = null;
-      }
-    };
+    return () => { pdfDocRef.current?.destroy(); pdfDocRef.current = null; };
   }, [ready, pdfUrl]);
 
   useEffect(() => () => { pdfDocRef.current?.destroy(); }, []);
@@ -293,7 +351,7 @@ const PdfViewer = ({
   }, [onPageChange]);
 
   const scrollToPage = (pageNum) => {
-    const p = Math.max(1, Math.min(pageNum, totalPages));
+    const p  = Math.max(1, Math.min(pageNum, totalPages));
     const el = scrollRef.current?.querySelector(`[data-page="${p}"]`);
     el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
@@ -301,7 +359,6 @@ const PdfViewer = ({
   if (error) return (
     <div className="flex items-center justify-center p-8 text-red-500 text-sm font-medium">{error}</div>
   );
-
   if (!ready || totalPages === 0) return (
     <div className="flex items-center justify-center p-12">
       <Spinner size="w-8 h-8" color="border-t-gray-500" />
@@ -311,7 +368,10 @@ const PdfViewer = ({
   return (
     <div className="relative flex" ref={containerRef}>
       <div ref={scrollRef} className="flex-1 overflow-y-auto pb-20 scroll-smooth" style={{ maxHeight: '100vh' }}>
-        <div className="flex flex-col items-center space-y-8 pt-8" style={{ paddingLeft: padding, paddingRight: padding }}>
+        <div
+          className="flex flex-col items-center space-y-8 pt-8"
+          style={{ paddingLeft: padding, paddingRight: padding }}
+        >
           {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
             <PdfPage
               key={pageNum}
@@ -336,11 +396,10 @@ const PdfViewer = ({
             Page {currentPage} of {totalPages}
           </span>
         </div>
-
         <div className="bg-white/90 backdrop-blur-sm border border-gray-200 shadow-sm px-2 py-1.5 rounded-full pointer-events-auto flex items-center gap-1 select-none">
           {[
             { label: '<', title: 'Previous page', delta: -1, disabled: currentPage <= 1 },
-            { label: '>', title: 'Next page', delta: 1, disabled: currentPage >= totalPages },
+            { label: '>', title: 'Next page',     delta:  1, disabled: currentPage >= totalPages },
           ].map(({ label, title, delta, disabled }) => (
             <button
               key={title}

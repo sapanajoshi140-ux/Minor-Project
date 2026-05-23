@@ -20,7 +20,6 @@ const TypingDots = () => (
 );
 
 // ── Animated placeholder hook ─────────────────────────────────────────────────
-// Cycles through sample questions with a typewriter + delete effect.
 const PLACEHOLDER_QUESTIONS = [
   'What is the main topic?',
   'Summarize the key points',
@@ -41,7 +40,6 @@ const useAnimatedPlaceholder = (active) => {
       const s = stateRef.current;
       const question = PLACEHOLDER_QUESTIONS[s.qIndex];
 
-      // Pause at full word before deleting
       if (!s.deleting && s.charIndex === question.length) {
         s.pauseTick++;
         if (s.pauseTick < 18) { timerRef.current = setTimeout(tick, 80); return; }
@@ -49,7 +47,6 @@ const useAnimatedPlaceholder = (active) => {
         s.pauseTick = 0;
       }
 
-      // Pause at empty before next word
       if (s.deleting && s.charIndex === 0) {
         s.pauseTick++;
         if (s.pauseTick < 8) { timerRef.current = setTimeout(tick, 80); return; }
@@ -73,39 +70,6 @@ const useAnimatedPlaceholder = (active) => {
   return placeholder;
 };
 
-// ── Typewriter hook ───────────────────────────────────────────────────────────
-// Animates `text` character by character. Returns the currently displayed slice.
-const useTypewriter = (text, speed = 18, enabled = true) => {
-  const [displayed, setDisplayed] = useState('');
-  const [done, setDone] = useState(false);
-  const indexRef = useRef(0);
-  const timerRef = useRef(null);
-
-  useEffect(() => {
-    if (!enabled || !text) {
-      setDisplayed(text || '');
-      setDone(true);
-      return;
-    }
-    // Reset when text changes (e.g. streaming chunk arrives)
-    setDone(false);
-    const tick = () => {
-      indexRef.current += 1;
-      setDisplayed(text.slice(0, indexRef.current));
-      if (indexRef.current < text.length) {
-        timerRef.current = setTimeout(tick, speed);
-      } else {
-        setDone(true);
-      }
-    };
-    timerRef.current = setTimeout(tick, speed);
-    return () => clearTimeout(timerRef.current);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [text]);
-
-  return { displayed, done };
-};
-
 // ── Fake typing illusion bubble ───────────────────────────────────────────────
 const FakeTypingBubble = () => (
   <div className="px-3.5 py-3 rounded-2xl bg-white border border-gray-100 shadow-sm rounded-tl-sm">
@@ -116,7 +80,7 @@ const FakeTypingBubble = () => (
 // ── Animated assistant bubble ─────────────────────────────────────────────────
 const AssistantBubble = ({ content, streaming }) => {
   return (
-    <div className="max-w-[78%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed bg-white border border-gray-100 text-gray-800 shadow-sm rounded-tl-sm">
+    <div className="max-w-[82%] sm:max-w-[78%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed bg-white border border-gray-100 text-gray-800 shadow-sm rounded-tl-sm">
       {content}
       {streaming && (
         <span className="inline-block w-0.5 h-3.5 bg-blue-400 ml-0.5 animate-pulse align-middle" />
@@ -128,7 +92,7 @@ const AssistantBubble = ({ content, streaming }) => {
 // ── Summary card ──────────────────────────────────────────────────────────────
 const SummaryCard = ({ selectedText, result }) => (
   <div className="flex justify-start">
-    <div className="max-w-[90%] w-full">
+    <div className="max-w-[95%] sm:max-w-[90%] w-full">
       <div className="flex items-center gap-1.5 mb-1.5 ml-1">
         <span className="text-[10px] font-semibold text-purple-500 uppercase tracking-wider">✨ Summary</span>
       </div>
@@ -162,9 +126,11 @@ const ChatPanel = ({
   documentName,
   injectedMessage,
   onInjectedMessageConsumed,
-  panelWidth = 380, 
+  panelWidth = 380,
 }) => {
-  const maxTextareaHeight = Math.max(96, Math.round(panelWidth * 0.25));
+  // On very small screens use a tighter max textarea height
+  const maxTextareaHeight = Math.max(72, Math.round(Math.min(panelWidth, window.innerWidth) * 0.22));
+
   const [messages,    setMessages]    = useState([]);
   const [input,       setInput]       = useState('');
   const [sessionId,   setSessionId]   = useState(null);
@@ -175,7 +141,6 @@ const ChatPanel = ({
   const inputRef  = useRef(null);
   const abortRef  = useRef(null);
 
-  // Animated placeholder — only active when chat is empty and user hasn't typed
   const [inputFocused, setInputFocused] = useState(false);
   const animatedPlaceholder = useAnimatedPlaceholder(
     messages.length === 0 && !input && !inputFocused
@@ -230,12 +195,10 @@ const ChatPanel = ({
     setError('');
 
     const now = Date.now();
-    // Only add the user message here. The assistant bubble is created on first chunk.
     setMessages(prev => [
       ...prev,
       { role: 'user', content: q, id: now },
     ]);
-    // Show a "waiting" indicator separately via isStreaming state
     setIsStreaming(true);
 
     abortRef.current?.abort();
@@ -287,7 +250,6 @@ const ChatPanel = ({
               try {
                 const meta = JSON.parse(payload);
                 if (meta.session_id) setSessionId(meta.session_id);
-                // citations intentionally ignored
               } catch { /* ignore */ }
               expectMetaData = false;
               continue;
@@ -307,7 +269,11 @@ const ChatPanel = ({
   };
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    // On mobile, Enter should not send (likely soft keyboard), only on desktop
+    if (e.key === 'Enter' && !e.shiftKey && window.innerWidth >= 768) {
+      e.preventDefault();
+      sendMessage();
+    }
   };
 
   const clearChat = async () => {
@@ -325,11 +291,11 @@ const ChatPanel = ({
   };
 
   return (
-  <div style={{ height: '100vh' }} className="w-full flex flex-col bg-white border-l border-gray-100 shadow-xl">
+    <div style={{ height: '100%' }} className="w-full flex flex-col bg-white">
       {/* header */}
-      <div className="shrink-0 px-5 py-4 border-b border-gray-100 flex items-center gap-3 bg-gradient-to-r from-blue-50 to-indigo-50">
-        <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shrink-0">
-          <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className="shrink-0 px-4 sm:px-5 py-3 sm:py-4 border-b border-gray-100 flex items-center gap-3 bg-gradient-to-r from-blue-50 to-indigo-50">
+        <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shrink-0">
+          <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
           </svg>
         </div>
@@ -349,23 +315,23 @@ const ChatPanel = ({
       </div>
 
       {/* messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 bg-gray-50/40">
+      <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 sm:py-4 space-y-3 sm:space-y-4 bg-gray-50/40">
         {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-center py-12 select-none">
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center mb-4">
-              <svg className="w-8 h-8 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="flex flex-col items-center justify-center h-full text-center py-8 sm:py-12 select-none">
+            <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-2xl bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center mb-3 sm:mb-4">
+              <svg className="w-6 h-6 sm:w-8 sm:h-8 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
               </svg>
             </div>
             <p className="text-sm font-semibold text-gray-600 mb-1">Ask anything about this document</p>
-            <p className="text-xs text-gray-400 mb-1">Select a paragraph and hit Summarize,</p>
+            <p className="text-xs text-gray-400 mb-0.5">Select a paragraph and hit Summarize,</p>
             <p className="text-xs text-gray-400">or type a question below.</p>
-            <div className="mt-6 space-y-2 w-full max-w-xs">
+            <div className="mt-4 sm:mt-6 space-y-2 w-full max-w-xs">
               {['What is the main topic?', 'Summarize the key points', 'What conclusions are drawn?'].map(q => (
                 <button
                   key={q}
                   onClick={() => { setInput(q); inputRef.current?.focus(); }}
-                  className="w-full text-left text-xs text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-100 px-3 py-2 rounded-lg transition"
+                  className="w-full text-left text-xs text-blue-600 bg-blue-50 hover:bg-blue-100 active:bg-blue-200 border border-blue-100 px-3 py-2.5 sm:py-2 rounded-lg transition"
                 >
                   {q}
                 </button>
@@ -392,7 +358,7 @@ const ChatPanel = ({
               {msg.role === 'assistant' ? (
                 <AssistantBubble content={msg.content} streaming={msg.streaming} />
               ) : (
-                <div className="max-w-[78%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-tr-sm">
+                <div className="max-w-[82%] sm:max-w-[78%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-tr-sm">
                   {msg.content}
                 </div>
               )}
@@ -400,7 +366,6 @@ const ChatPanel = ({
           );
         })}
 
-        {/* Fake typing illusion — shown only while waiting for first real chunk */}
         {isStreaming && messages.length > 0 && messages[messages.length - 1].role === 'user' && (
           <div className="flex justify-start">
             <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shrink-0 mt-0.5 mr-2">
@@ -425,29 +390,29 @@ const ChatPanel = ({
       </div>
 
       {/* input */}
-      <div className="shrink-0 p-4 border-t border-gray-100 bg-white">
+      <div className="shrink-0 p-3 sm:p-4 border-t border-gray-100 bg-white">
         <div className="flex items-end gap-2 bg-gray-50 border border-gray-200 rounded-2xl px-3 py-2 focus-within:border-blue-300 focus-within:bg-white transition">
-         < textarea
-  ref={inputRef}
-  rows={1}
-  value={input}
-  onChange={e => setInput(e.target.value)}
-  onKeyDown={handleKeyDown}
-  onFocus={() => setInputFocused(true)}
-  onBlur={() => setInputFocused(false)}
-  placeholder={animatedPlaceholder}
-  disabled={isStreaming}
-  className="flex-1 bg-transparent text-sm text-gray-800 placeholder-gray-400 outline-none resize-none leading-relaxed disabled:opacity-60"
-  style={{ minHeight: '24px', maxHeight: `${maxTextareaHeight}px` }}  // ← dynamic max height
-  onInput={e => {
-    e.target.style.height = 'auto';
-    e.target.style.height = `${Math.min(e.target.scrollHeight, maxTextareaHeight)}px`; // ← use dynamic value
-  }}
-/>
+          <textarea
+            ref={inputRef}
+            rows={1}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onFocus={() => setInputFocused(true)}
+            onBlur={() => setInputFocused(false)}
+            placeholder={animatedPlaceholder}
+            disabled={isStreaming}
+            className="flex-1 bg-transparent text-sm text-gray-800 placeholder-gray-400 outline-none resize-none leading-relaxed disabled:opacity-60"
+            style={{ minHeight: '24px', maxHeight: `${maxTextareaHeight}px` }}
+            onInput={e => {
+              e.target.style.height = 'auto';
+              e.target.style.height = `${Math.min(e.target.scrollHeight, maxTextareaHeight)}px`;
+            }}
+          />
           <button
             onClick={sendMessage}
             disabled={!input.trim() || isStreaming}
-            className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center transition hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+            className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center transition hover:opacity-90 active:opacity-80 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
           >
             {isStreaming ? (
               <div className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />
@@ -458,7 +423,8 @@ const ChatPanel = ({
             )}
           </button>
         </div>
-        <p className="text-[10px] text-gray-400 text-center mt-2">
+        {/* Hide the hint on very small screens to save space */}
+        <p className="hidden sm:block text-[10px] text-gray-400 text-center mt-2">
           Enter to send · Shift+Enter for new line
         </p>
       </div>

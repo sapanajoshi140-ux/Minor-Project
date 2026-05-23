@@ -1,19 +1,4 @@
-/**
- * SettingsModal.jsx
- * ------------------
- * Drop-in settings panel for ReadWithEase — Security only.
- *
- * Props:
- *   isOpen      boolean   – controls visibility
- *   onClose     () => void
- *   apiUrl      string    – e.g. "https://api.example.com"
- *   authHeaders object    – { Authorization: "Bearer <token>" }
- *   onAuthError () => void – called on 401
- *   user        { email, full_name }
- *
- * Requires:
- *   - lucide-react
- */
+
 
 import React, { useState, useEffect, useRef } from 'react';
 import {

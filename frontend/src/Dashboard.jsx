@@ -57,16 +57,31 @@ const Dashboard = () => {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Upload failed (${res.status})`);
     }
-    const data = await res.json();
-    // After upload, open the document in workspace
-    setDocumentId(data.document_id || data.id);
-    setDocumentName(file.name);
-    setTotalPages(data.total_pages || 0);
-    setDocumentCategory(data.document_category || '');
-    setLastSessionId(null);
-    setIsInWorkspace(true);
-  };
+    const data = await res.json();  
+    const docId = data.document_id || data.id;
 
+  // Start reading session immediately after upload
+  try {
+    const sessRes = await fetch(`${API_URL}/reading-session/start`, {
+      method: 'POST',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ document_id: docId }),
+    });
+    if (sessRes.ok) {
+      const sessData = await sessRes.json();
+      setLastSessionId(sessData.session_id);   // ← store it
+    }
+  } catch (err) {
+    console.error('Failed to start reading session after upload:', err);
+  }
+
+  setDocumentId(docId);
+  setDocumentName(file.name);
+  setTotalPages(data.total_pages || 0);
+  setDocumentCategory(data.document_category || '');
+  setIsInWorkspace(true);
+};
+    
   const handleOpenDocument = async (doc) => {
     const docId = doc.id || doc.document_id;
     setLastSessionId(doc.sessionId || null);
@@ -94,12 +109,28 @@ const Dashboard = () => {
     setIsInWorkspace(true);
   };
 
-  const handleBackFromWorkspace = () => {
-    setIsInWorkspace(false);
-    setDocumentId(null);
-    setDocumentName('');
-    setDocumentCategory('');
-  };
+ // Replace handleBackFromWorkspace with this:
+const handleBackFromWorkspace = useCallback(async (activeSeconds = 0) => {
+  if (lastSessionId) {
+    try {
+      await fetch(`${API_URL}/reading-session/end`, {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: lastSessionId,
+          active_seconds: Math.round(activeSeconds),
+        }),
+      });
+    } catch (err) {
+      console.error('Failed to end reading session:', err);
+    }
+  }
+  setIsInWorkspace(false);
+  setDocumentId(null);
+  setDocumentName('');
+  setDocumentCategory('');
+  setLastSessionId(null);
+}, [lastSessionId, getAuthHeaders]);
 
   const handleLogout = () => {
     logout();
@@ -118,6 +149,7 @@ const Dashboard = () => {
         authHeaders={getAuthHeaders()}
         onBack={handleBackFromWorkspace}
         onAuthError={handleAuthError}
+        sessionId={lastSessionId}   
       />
     );
   }

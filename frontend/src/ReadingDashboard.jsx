@@ -3,7 +3,7 @@ import {
   FileText, LogOut, HardDrive, Clock, BookOpen,
   Upload, LayoutDashboard, ChevronRight,
   Flame, Target, BookMarked, Search, X,
-  Settings, Trash2,
+  Settings, Trash2, Menu, ArrowLeft,
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -98,8 +98,8 @@ const ReadingGoalModal = ({ isOpen, onClose, currentGoal, onSave, isLoading }) =
   const [goal, setGoal] = useState(currentGoal);
   if (!isOpen) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="bg-neutral-800 border border-white/10 rounded-2xl p-6 w-80">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="bg-neutral-800 border border-white/10 rounded-2xl p-6 w-full max-w-sm">
         <h3 className="text-lg font-bold text-white mb-4">Daily Reading Goal</h3>
         <p className="text-sm text-white/50 mb-4">Set your target reading time in minutes per day.</p>
         <input
@@ -127,6 +127,17 @@ const ReadingGoalModal = ({ isOpen, onClose, currentGoal, onSave, isLoading }) =
   );
 };
 
+// ── Bottom nav items (mobile) ─────────────────────────────────────────────────
+const NAV_ITEMS = [
+  { id: 'overview',   icon: LayoutDashboard, label: 'Overview'      },
+    { id: 'upload',     icon: Upload,          label: 'Upload'    },
+  
+  { id: 'documents',  icon: FileText,        label: 'My Documents' },
+
+  { id: 'vocabulary', icon: BookMarked,      label: 'My Vocabulary'     },
+  { id: 'history',    icon: Clock,           label: 'Reading History'   },
+];
+
 // ── Main component ────────────────────────────────────────────────────────────
 const ReadingDashboard = ({
   apiUrl,
@@ -145,13 +156,14 @@ const ReadingDashboard = ({
   }, []);
 
   // ── State ─────────────────────────────────────────────────────────────────
-  const [stats,         setStats]         = useState(null);
-  const [documents,     setDocuments]     = useState([]);
-  const [storage,       setStorage]       = useState(null);
-  const [loading,       setLoading]       = useState(true);
-  const [activeNav,     setActiveNav]     = useState('overview');
-  const [uploadError,   setUploadError]   = useState('');
-  const [isUploading,   setIsUploading]   = useState(false);
+  const [stats,          setStats]          = useState(null);
+  const [documents,      setDocuments]      = useState([]);
+  const [storage,        setStorage]        = useState(null);
+  const [loading,        setLoading]        = useState(true);
+  const [activeNav,      setActiveNav]      = useState('overview');
+  const [uploadError,    setUploadError]    = useState('');
+  const [isUploading,    setIsUploading]    = useState(false);
+  const [sidebarOpen,    setSidebarOpen]    = useState(false);
 
   const [vocabulary,    setVocabulary]    = useState([]);
   const [vocabLoading,  setVocabLoading]  = useState(false);
@@ -181,6 +193,13 @@ const ReadingDashboard = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Close sidebar on nav change (mobile)
+  const handleNavChange = (id) => {
+    setActiveNav(id);
+    setSidebarOpen(false);
+    if (id === 'vocabulary') fetchVocabulary();
+  };
+
   // ── Helpers ───────────────────────────────────────────────────────────────
   const getHeaders = useCallback(() => ({
     ...authHeaders,
@@ -193,7 +212,7 @@ const ReadingDashboard = ({
 
   const displayName = user?.full_name?.split(' ')[0] || user?.email || '';
 
-  // ── Merge time map into documents state ───────────────────────────────────
+  // ── Merge time map ────────────────────────────────────────────────────────
   const mergeTimeMap = useCallback((timeMap) => {
     if (!timeMap || Object.keys(timeMap).length === 0) return;
     setDocuments(prev => prev.map(doc => {
@@ -202,7 +221,7 @@ const ReadingDashboard = ({
     }));
   }, []);
 
-  // ── Fetch all documents (paginated) ──────────────────────────────────────
+  // ── Fetch all documents ───────────────────────────────────────────────────
   const fetchAllDocuments = useCallback(async () => {
     const allDocs = [];
     let page = 1;
@@ -259,52 +278,8 @@ const ReadingDashboard = ({
         fetch(`${apiUrl}/me/dashboard`, { headers }),
         fetch(`${apiUrl}/me/storage`, { headers }),
       ]);
-
       if (!mountedRef.current) return;
       if (dashRes.status === 401) { onAuthError(); return; }
-
-      if (dashRes.ok) {
-        const data = await dashRes.json();
-        if (mountedRef.current) {
-          setStats(data.stats);
-          setDailyChart(data.daily_chart || []);
-          setVocabulary(data.vocabulary || []);
-          setVocabTotal(data.vocabulary?.length || 0);
-          setReadingGoal(data.stats?.daily_goal_minutes || 60);
-        }
-
-        // Build time map from the 5 recent docs the dashboard already returns
-        const timeMap = {};
-        (data.recent_documents || []).forEach(d => {
-          timeMap[d.id] = d.time_spent_seconds;
-        });
-
-        // Fetch all docs first, then merge time into them
-        await fetchAllDocuments();
-
-        if (mountedRef.current) mergeTimeMap(timeMap);
-      }
-
-      if (storageRes.ok && mountedRef.current) setStorage(await storageRes.json());
-
-    } catch (err) {
-      console.error('Dashboard fetch error:', err);
-    } finally {
-      if (mountedRef.current) setLoading(false);
-    }
-  }, [apiUrl, getHeaders, onAuthError, fetchAllDocuments, mergeTimeMap]);
-
-  // ── Silent refresh (after reading session ends / upload) ──────────────────
-  const silentRefresh = useCallback(async () => {
-    try {
-      const headers = getHeaders();
-      const [dashRes, storageRes] = await Promise.all([
-        fetch(`${apiUrl}/me/dashboard`, { headers }),
-        fetch(`${apiUrl}/me/storage`, { headers }),
-      ]);
-      if (!mountedRef.current) return;
-      if (dashRes.status === 401) { onAuthError(); return; }
-
       if (dashRes.ok) {
         const data = await dashRes.json();
         if (mountedRef.current) {
@@ -318,15 +293,61 @@ const ReadingDashboard = ({
         (data.recent_documents || []).forEach(d => { timeMap[d.id] = d.time_spent_seconds; });
         await fetchAllDocuments();
         if (mountedRef.current) mergeTimeMap(timeMap);
+        try {
+          const timeRes = await fetch(`${apiUrl}/me/documents/time`, { headers });
+          if (timeRes.ok) {
+            const timeData = await timeRes.json();
+            const fullTimeMap = {};
+            (timeData.documents || []).forEach(d => { fullTimeMap[d.id] = d.time_spent_seconds; });
+            if (mountedRef.current) mergeTimeMap(fullTimeMap);
+          }
+        } catch (err) { console.error('Failed to fetch full document time data:', err); }
       }
-
       if (storageRes.ok && mountedRef.current) setStorage(await storageRes.json());
     } catch (err) {
-      console.error('Silent refresh failed:', err);
+      console.error('Dashboard fetch error:', err);
+    } finally {
+      if (mountedRef.current) setLoading(false);
     }
   }, [apiUrl, getHeaders, onAuthError, fetchAllDocuments, mergeTimeMap]);
 
-  // ── End last reading session on mount ─────────────────────────────────────
+  // ── Silent refresh ────────────────────────────────────────────────────────
+  const silentRefresh = useCallback(async () => {
+    try {
+      const headers = getHeaders();
+      const [dashRes, storageRes] = await Promise.all([
+        fetch(`${apiUrl}/me/dashboard`, { headers }),
+        fetch(`${apiUrl}/me/storage`, { headers }),
+      ]);
+      if (!mountedRef.current) return;
+      if (dashRes.status === 401) { onAuthError(); return; }
+      if (dashRes.ok) {
+        const data = await dashRes.json();
+        if (mountedRef.current) {
+          setStats(data.stats);
+          setDailyChart(data.daily_chart || []);
+          setVocabulary(data.vocabulary || []);
+          setVocabTotal(data.vocabulary?.length || 0);
+          setReadingGoal(data.stats?.daily_goal_minutes || 60);
+        }
+        const timeMap = {};
+        (data.recent_documents || []).forEach(d => { timeMap[d.id] = d.time_spent_seconds; });
+        await fetchAllDocuments();
+        if (mountedRef.current) mergeTimeMap(timeMap);
+        try {
+          const timeRes = await fetch(`${apiUrl}/me/documents/time`, { headers });
+          if (timeRes.ok) {
+            const timeData = await timeRes.json();
+            const fullTimeMap = {};
+            (timeData.documents || []).forEach(d => { fullTimeMap[d.id] = d.time_spent_seconds; });
+            if (mountedRef.current) mergeTimeMap(fullTimeMap);
+          }
+        } catch (err) { console.error('Silent refresh time fetch failed:', err); }
+      }
+      if (storageRes.ok && mountedRef.current) setStorage(await storageRes.json());
+    } catch (err) { console.error('Silent refresh failed:', err); }
+  }, [apiUrl, getHeaders, onAuthError, fetchAllDocuments, mergeTimeMap]);
+
   const lastSessionIdRef = useRef(lastSessionId);
   useEffect(() => { lastSessionIdRef.current = lastSessionId; }, [lastSessionId]);
 
@@ -334,16 +355,7 @@ const ReadingDashboard = ({
     const init = async () => {
       await fetchDashboard();
       if (lastSessionIdRef.current) {
-        try {
-          await fetch(`${apiUrl}/reading-session/end`, {
-            method: 'POST',
-            headers: getHeaders(),
-            body: JSON.stringify({ session_id: lastSessionIdRef.current }),
-          });
-          await silentRefresh();
-        } catch (err) {
-          console.error('Failed to end reading session:', err);
-        }
+        try { await silentRefresh(); } catch (err) { console.error('Failed to refresh:', err); }
       }
     };
     init();
@@ -428,7 +440,7 @@ const ReadingDashboard = ({
     }
   }, [apiUrl, getHeaders, onAuthError]);
 
-  // ── Derived chart values ──────────────────────────────────────────────────
+  // ── Derived values ────────────────────────────────────────────────────────
   const days      = last14Days();
   const dayMap    = {};
   (dailyChart || []).forEach(d => { dayMap[d.date] = d.minutes; });
@@ -477,7 +489,7 @@ const ReadingDashboard = ({
     },
     scales: {
       x: {
-        ticks: { color: 'rgba(255,255,255,0.3)', font: { size: 10 }, maxRotation: 35, autoSkip: false },
+        ticks: { color: 'rgba(255,255,255,0.3)', font: { size: 9 }, maxRotation: 45, autoSkip: true, maxTicksLimit: 7 },
         grid: { display: false },
         border: { display: false },
       },
@@ -493,39 +505,39 @@ const ReadingDashboard = ({
   // ── Skeletons ─────────────────────────────────────────────────────────────
   const StatCardSkeleton = () => (
     <div className="bg-white/5 border border-white/10 rounded-2xl p-4 animate-pulse">
-      <div className="h-3 w-24 bg-white/10 rounded mb-4" />
-      <div className="h-7 w-16 bg-white/10 rounded mb-2" />
-      <div className="h-2 w-20 bg-white/10 rounded" />
+      <div className="h-3 w-20 bg-white/10 rounded mb-4" />
+      <div className="h-7 w-14 bg-white/10 rounded mb-2" />
+      <div className="h-2 w-16 bg-white/10 rounded" />
     </div>
   );
 
   const DocItemSkeleton = () => (
-    <div className="w-full flex items-center gap-4 p-4 bg-white/5 border border-white/10 rounded-2xl animate-pulse">
-      <div className="w-11 h-11 rounded-xl bg-white/10 flex-shrink-0" />
-      <div className="flex-1">
-        <div className="h-4 w-48 bg-white/10 rounded mb-2" />
-        <div className="h-2 w-32 bg-white/10 rounded" />
+    <div className="w-full flex items-center gap-3 p-4 bg-white/5 border border-white/10 rounded-2xl animate-pulse">
+      <div className="w-10 h-10 rounded-xl bg-white/10 flex-shrink-0" />
+      <div className="flex-1 min-w-0">
+        <div className="h-4 w-36 bg-white/10 rounded mb-2" />
+        <div className="h-2 w-24 bg-white/10 rounded" />
       </div>
-      <div className="h-4 w-12 bg-white/10 rounded" />
+      <div className="h-4 w-10 bg-white/10 rounded flex-shrink-0" />
     </div>
   );
 
   const VocabItemSkeleton = () => (
-    <div className="rounded-2xl overflow-hidden border border-white/10 bg-white/5 p-4 animate-pulse">
-      <div className="flex items-center gap-4">
-        <div className="w-11 h-11 rounded-xl bg-white/10 flex-shrink-0" />
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 animate-pulse">
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-white/10 flex-shrink-0" />
         <div className="flex-1">
-          <div className="h-4 w-24 bg-white/10 rounded mb-2" />
-          <div className="h-2 w-40 bg-white/10 rounded" />
+          <div className="h-4 w-20 bg-white/10 rounded mb-2" />
+          <div className="h-2 w-32 bg-white/10 rounded" />
         </div>
       </div>
     </div>
   );
 
   const ChartSkeleton = () => (
-    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 animate-pulse" style={{ height: 340 }}>
+    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 animate-pulse" style={{ height: 220 }}>
       <div className="h-4 w-40 bg-white/10 rounded mb-6" />
-      <div className="flex items-end gap-2 h-52">
+      <div className="flex items-end gap-1.5 h-28">
         {[40,70,30,90,50,80,60,45,75,55,85,65,95,100].map((h,i) => (
           <div key={i} className="flex-1 bg-white/10 rounded-sm" style={{ height: `${h}%` }} />
         ))}
@@ -533,20 +545,43 @@ const ReadingDashboard = ({
     </div>
   );
 
-  // ── Reusable sub-components ───────────────────────────────────────────────
+  // ── Stat cards (2-col on mobile, 4-col on desktop) ───────────────────────
+  const StatCards = () => (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      {[
+        { icon: Clock,    label: 'Total read',      value: fmtMins(totalMins), sub: 'All time' },
+        { icon: Target,   label: "Today",           value: fmtMins(todayMins), sub: `Goal: ${dailyGoal}m`, progress: todayPct },
+        { icon: BookOpen, label: 'Docs read',       value: docsRead,           sub: `${totalDocs} uploaded` },
+        { icon: Flame,    label: 'Streak',          value: `${streak}d`,       sub: `Best: ${bestStreak}d` },
+      ].map(({ icon: Icon, label, value, sub, progress }) => (
+        <div key={label} className="bg-white/5 border border-white/10 rounded-2xl p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Icon className="w-3.5 h-3.5 text-white/40" />
+            <span className="text-[11px] text-white/40">{label}</span>
+          </div>
+          <p className="text-xl sm:text-2xl font-bold">{value}</p>
+          {progress != null && (
+            <div className="w-full bg-white/10 rounded-full h-1 my-2">
+              <div className="h-1 rounded-full bg-blue-400" style={{ width: `${progress}%` }} />
+            </div>
+          )}
+          <p className="text-[10px] mt-1.5 text-white/30">{sub}</p>
+        </div>
+      ))}
+    </div>
+  );
+
+  // ── Upload card ───────────────────────────────────────────────────────────
   const UploadCard = (
-    <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+    <div className="bg-white/5 border border-white/10 rounded-2xl p-4 sm:p-5 w-full sm:ml-55 sm:w-200">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Upload className="w-4 h-4 text-amber-400" />
-          <p className="text-sm font-medium text-white/70">Upload New Document</p>
+          <p className="text-sm font-medium text-white/70">Upload Document</p>
         </div>
         {activeNav === 'overview' && (
-          <button
-            onClick={() => setActiveNav('upload')}
-            className="text-[11px] text-amber-400 hover:text-amber-300 transition"
-          >
-            Full upload page →
+          <button onClick={() => setActiveNav('upload')} className="text-[11px] text-amber-400 hover:text-amber-300 transition">
+            Full page →
           </button>
         )}
       </div>
@@ -554,31 +589,7 @@ const ReadingDashboard = ({
     </div>
   );
 
-  const StatCards = () => (
-    <div className="grid grid-cols-4 gap-3">
-      {[
-        { icon: Clock,    label: 'Total time read',  value: fmtMins(totalMins), sub: 'All time' },
-        { icon: Target,   label: "Today's reading",  value: fmtMins(todayMins), sub: `Goal: ${dailyGoal} min`, progress: todayPct },
-        { icon: BookOpen, label: 'Documents read',   value: docsRead,           sub: `${totalDocs} uploaded` },
-        { icon: Flame,    label: 'Current streak',   value: `${streak}d`,       sub: `Best: ${bestStreak} days` },
-      ].map(({ icon: Icon, label, value, sub, progress }) => (
-        <div key={label} className="bg-white/5 border border-white/10 rounded-2xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <Icon className="w-4 h-4 text-white/40" />
-            <span className="text-[11px] text-white/40">{label}</span>
-          </div>
-          <p className="text-2xl font-bold">{value}</p>
-          {progress != null && (
-            <div className="w-full bg-white/10 rounded-full h-1 my-2">
-              <div className="h-1 rounded-full bg-blue-400" style={{ width: `${progress}%` }} />
-            </div>
-          )}
-          <p className="text-[11px] mt-1.5 text-white/30">{sub}</p>
-        </div>
-      ))}
-    </div>
-  );
-
+  // ── Doc button ────────────────────────────────────────────────────────────
   const DocButton = ({ doc, query = '', compact = false }) => {
     const id = doc.id || doc.document_id;
     return (
@@ -587,26 +598,26 @@ const ReadingDashboard = ({
           const sessionId = await startReadingSession(id);
           onOpenDocument({ ...doc, id, sessionId });
         }}
-        className={`w-full flex items-center gap-3 rounded-xl hover:bg-white/5 transition text-left group relative ${
+        className={`w-full flex items-center gap-3 rounded-xl hover:bg-white/5 active:bg-white/10 transition text-left group relative ${
           compact ? 'p-3' : 'p-4 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 rounded-2xl'
         }`}
       >
-        <div className={`rounded-lg flex items-center justify-center flex-shrink-0 ${compact ? 'w-9 h-9 text-base bg-white/8' : 'w-11 h-11 text-xl bg-white/10'}`}>
+        <div className={`rounded-lg flex items-center justify-center flex-shrink-0 ${compact ? 'w-9 h-9 text-base bg-white/8' : 'w-10 h-10 sm:w-11 sm:h-11 text-xl bg-white/10'}`}>
           {catIcon(doc.document_category || doc.file_type)}
         </div>
         <div className="flex-1 min-w-0">
-          <p className={`font-medium text-white truncate ${compact ? 'text-sm' : ''}`}>
+          <p className={`font-medium text-white truncate ${compact ? 'text-sm' : 'text-sm sm:text-base'}`}>
             <Highlight text={doc.filename} query={query} />
           </p>
           <p className="text-[11px] text-white/35 mt-0.5">
-            {doc.total_pages || 0} pages · {fmt(doc.file_size_bytes)} · {fmtDate(doc.created_at)}
+            {doc.total_pages || 0}p · {fmt(doc.file_size_bytes)} · {fmtDate(doc.created_at)}
           </p>
         </div>
         <div className="text-right flex-shrink-0">
-          <p className="text-sm text-white/50">
+          <p className="text-xs sm:text-sm text-white/50">
             {doc.time_spent_seconds ? fmtMins(doc.time_spent_seconds / 60) : '—'}
           </p>
-          <p className="text-[10px] text-white/25 mt-0.5">time spent</p>
+          <p className="text-[10px] text-white/25 mt-0.5 hidden sm:block">time spent</p>
         </div>
         <button
           onClick={(e) => {
@@ -614,29 +625,41 @@ const ReadingDashboard = ({
             setDeleteModal({ open: true, doc, deleting: false });
             setDeleteError('');
           }}
-          className="opacity-0 group-hover:opacity-100 transition p-1.5 rounded-lg hover:bg-red-500/15 text-white/20 hover:text-red-400"
-          title="Delete document"
+          className="opacity-0 group-hover:opacity-100 sm:flex hidden transition p-1.5 rounded-lg hover:bg-red-500/15 text-white/20 hover:text-red-400"
+          title="Delete"
         >
-          <Trash2 className={compact ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
+          <Trash2 className="w-3.5 h-3.5" />
         </button>
-        <ChevronRight className="w-4 h-4 text-white/20 opacity-0 group-hover:opacity-100 transition" />
+        {/* mobile delete: long-press not practical, show always on small screens */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setDeleteModal({ open: true, doc, deleting: false });
+            setDeleteError('');
+          }}
+          className="flex sm:hidden p-1.5 rounded-lg text-white/15 active:text-red-400"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+        <ChevronRight className="w-4 h-4 text-white/20 hidden sm:block opacity-0 group-hover:opacity-100 transition" />
       </button>
     );
   };
 
+  // ── Delete modal ──────────────────────────────────────────────────────────
   const DeleteModal = () => {
     const { open, doc, deleting } = deleteModal;
     if (!open || !doc) return null;
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-        <div className="bg-neutral-800 border border-white/10 rounded-2xl p-6 w-96">
+      <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+        <div className="bg-neutral-800 border border-white/10 rounded-2xl p-6 w-full max-w-sm">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-xl bg-red-500/15 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-red-500/15 flex items-center justify-center flex-shrink-0">
               <Trash2 className="w-5 h-5 text-red-400" />
             </div>
             <div>
-              <h3 className="text-lg font-bold text-white">Delete Document</h3>
-              <p className="text-xs text-white/40">This action cannot be undone</p>
+              <h3 className="text-base font-bold text-white">Delete Document</h3>
+              <p className="text-xs text-white/40">This cannot be undone</p>
             </div>
           </div>
           <p className="text-sm text-white/60 mb-1">Are you sure you want to delete:</p>
@@ -650,14 +673,14 @@ const ReadingDashboard = ({
             <button
               onClick={() => { setDeleteModal({ open: false, doc: null, deleting: false }); setDeleteError(''); }}
               disabled={deleting}
-              className="flex-1 py-2.5 bg-white/5 border border-white/10 rounded-xl text-white/60 hover:bg-white/10 transition disabled:opacity-50"
+              className="flex-1 py-3 bg-white/5 border border-white/10 rounded-xl text-white/60 hover:bg-white/10 transition disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               onClick={handleDelete}
               disabled={deleting}
-              className="flex-1 py-2.5 bg-red-500 rounded-xl text-white font-medium hover:bg-red-600 transition disabled:opacity-50 flex items-center justify-center gap-2"
+              className="flex-1 py-3 bg-red-500 rounded-xl text-white font-medium hover:bg-red-600 transition disabled:opacity-50 flex items-center justify-center gap-2"
             >
               {deleting ? (
                 <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Deleting…</>
@@ -668,6 +691,118 @@ const ReadingDashboard = ({
       </div>
     );
   };
+
+  // ── Sidebar content (shared between desktop sidebar & mobile drawer) ──────
+  const SidebarContent = () => (
+    <>
+      {/* Logo */}
+      <div className="p-5 border-b border-white/10 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold font-serif">ReadWithEase</h1>
+          <p className="text-[11px] text-white/35 mt-0.5">AI Reading Companion</p>
+          {displayName && <p className="text-[11px] text-amber-400 mt-1">👋 Hey, {displayName}</p>}
+        </div>
+        {/* Close button — mobile only */}
+        <button
+          className="sm:hidden p-2 rounded-xl text-white/40 hover:text-white hover:bg-white/5 transition"
+          onClick={() => setSidebarOpen(false)}
+        >
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+
+      {/* Nav */}
+      <nav className="flex-1 p-3 space-y-1">
+        {NAV_ITEMS.map(({ id, icon: Icon, label }) => {
+          const badge = id === 'documents' ? (totalDocs > 0 ? totalDocs : null)
+                      : id === 'vocabulary' ? (vocabTotal > 0 ? vocabTotal : null)
+                      : null;
+          return (
+            <button
+              key={id}
+              onClick={() => handleNavChange(id)}
+              className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm transition-all ${
+                activeNav === id ? 'bg-white/10 text-white' : 'text-white/50 hover:bg-white/5 hover:text-white'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              <span className="font-medium">{label}</span>
+              {badge && (
+                <span className="ml-auto text-[11px] bg-white/10 text-white/50 px-2 py-0.5 rounded-full">{badge}</span>
+              )}
+              {activeNav === id && <ChevronRight className="w-3 h-3 ml-auto text-white/30" />}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* Storage */}
+      {storage && (
+        <div className="px-3 pb-2">
+          <div className="bg-white/5 border border-white/10 rounded-xl p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <HardDrive className="w-3.5 h-3.5 text-white/40" />
+              <span className="text-[11px] text-white/40 font-medium">Storage</span>
+              <span className={`ml-auto text-[11px] font-medium ${nearFull ? 'text-red-400' : 'text-white/40'}`}>
+                {usedMb.toFixed(1)} / {limitMb.toFixed(0)} MB
+              </span>
+            </div>
+            <div className="w-full bg-white/10 rounded-full h-1.5">
+              <div className={`h-1.5 rounded-full transition-all ${nearFull ? 'bg-red-400' : 'bg-blue-400'}`} style={{ width: `${usedPct}%` }} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* User menu */}
+      <div className="p-3 border-t border-white/10" ref={userMenuRef}>
+        <div className="relative">
+          <button
+            onClick={() => setShowUserMenu(prev => !prev)}
+            className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl hover:bg-white/5 transition"
+          >
+            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-xs font-bold text-white flex-shrink-0 shadow-lg">
+              {initials}
+            </div>
+            <div className="flex-1 min-w-0 text-left">
+              <p className="text-sm font-medium text-white truncate leading-tight">{user?.full_name || 'Account'}</p>
+              <p className="text-[10px] text-white/35 truncate">{user?.email}</p>
+            </div>
+            <ChevronRight className={`w-3.5 h-3.5 text-white/30 transition-transform duration-200 ${showUserMenu ? '-rotate-90' : 'rotate-90'}`} />
+          </button>
+
+          {showUserMenu && (
+            <div className="absolute bottom-full left-0 right-0 mb-2 bg-neutral-800 border border-white/10 rounded-xl overflow-hidden shadow-2xl z-10">
+              <div className="px-4 py-3 border-b border-white/10 flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-sm font-bold text-white flex-shrink-0">
+                  {initials}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-white truncate">{user?.full_name || 'Account'}</p>
+                  <p className="text-[10px] text-white/40 truncate">{user?.email}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => { setShowUserMenu(false); setShowSettings(true); setSidebarOpen(false); }}
+                className="w-full flex items-center gap-2.5 px-4 py-3 text-sm text-white/70 hover:bg-white/5 hover:text-white transition"
+              >
+                <Settings className="w-4 h-4" />Settings
+              </button>
+              <div className="h-px bg-white/10" />
+              <button
+                onClick={() => { setShowUserMenu(false); onLogout(); }}
+                className="w-full flex items-center gap-2.5 px-4 py-3 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 transition"
+              >
+                <LogOut className="w-4 h-4" />Logout
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+
+  const currentNavItem = NAV_ITEMS.find(n => n.id === activeNav);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -682,445 +817,397 @@ const ReadingDashboard = ({
         onAuthError={onAuthError}
         user={user}
       />
+      <ReadingGoalModal
+        isOpen={showGoalModal}
+        onClose={() => setShowGoalModal(false)}
+        currentGoal={dailyGoal}
+        onSave={updateReadingGoal}
+        isLoading={isSavingGoal}
+      />
 
-      {/* ── SIDEBAR ── */}
-      <aside className="w-[230px] flex-shrink-0 bg-black/20 border-r border-white/10 flex flex-col">
-        <div className="p-5 border-b border-white/10">
-          <h1 className="text-xl font-bold font-serif">ReadWithEase</h1>
-          <p className="text-[11px] text-white/35 mt-0.5">AI-Powered Reading Companion</p>
-          {displayName && <p className="text-[11px] text-amber-400 mt-1.5">👋 Hey, {displayName}</p>}
-        </div>
+      {/* ── MOBILE SIDEBAR OVERLAY ── */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm sm:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
 
-        <nav className="flex-1 p-3 space-y-1">
-          {[
-            { id: 'overview',   icon: LayoutDashboard, label: 'Overview' },
-            { id: 'upload',     icon: Upload,          label: 'Upload Document' },
-            { id: 'documents',  icon: FileText,        label: 'My Documents',  badge: totalDocs > 0 ? totalDocs : null },
-            { id: 'vocabulary', icon: BookMarked,      label: 'My Vocabulary', badge: vocabTotal > 0 ? vocabTotal : null },
-            { id: 'history',    icon: Clock,           label: 'Reading History' },
-          ].map(({ id, icon: Icon, label, badge }) => (
-            <button
-              key={id}
-              onClick={() => { setActiveNav(id); if (id === 'vocabulary') fetchVocabulary(); }}
-              className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm transition-all ${
-                activeNav === id ? 'bg-white/10 text-white' : 'text-white/50 hover:bg-white/5 hover:text-white'
-              }`}
-            >
-              <Icon className="w-4 h-4" />
-              <span className="font-medium">{label}</span>
-              {badge && (
-                <span className="ml-auto text-[11px] bg-white/10 text-white/50 px-2 py-0.5 rounded-full">{badge}</span>
-              )}
-              {activeNav === id && <ChevronRight className="w-3 h-3 ml-auto text-white/30" />}
-            </button>
-          ))}
-        </nav>
-
-        {storage && (
-          <div className="px-3 pb-2">
-            <div className="bg-white/5 border border-white/10 rounded-xl p-3">
-              <div className="flex items-center gap-2 mb-2">
-                <HardDrive className="w-3.5 h-3.5 text-white/40" />
-                <span className="text-[11px] text-white/40 font-medium">Storage</span>
-                <span className={`ml-auto text-[11px] font-medium ${nearFull ? 'text-red-400' : 'text-white/40'}`}>
-                  {usedMb.toFixed(1)} / {limitMb.toFixed(0)} MB
-                </span>
-              </div>
-              <div className="w-full bg-white/10 rounded-full h-1.5">
-                <div
-                  className={`h-1.5 rounded-full transition-all ${nearFull ? 'bg-red-400' : 'bg-blue-400'}`}
-                  style={{ width: `${usedPct}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* User menu */}
-        <div className="p-3 border-t border-white/10" ref={userMenuRef}>
-          <div className="relative">
-            <button
-              onClick={() => setShowUserMenu(prev => !prev)}
-              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl hover:bg-white/5 transition"
-            >
-              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-xs font-bold text-white flex-shrink-0 shadow-lg">
-                {initials}
-              </div>
-              <div className="flex-1 min-w-0 text-left">
-                <p className="text-sm font-medium text-white truncate leading-tight">{user?.full_name || 'Account'}</p>
-                <p className="text-[10px] text-white/35 truncate">{user?.email}</p>
-              </div>
-              <ChevronRight className={`w-3.5 h-3.5 text-white/30 transition-transform duration-200 ${showUserMenu ? '-rotate-90' : 'rotate-90'}`} />
-            </button>
-
-            {showUserMenu && (
-              <div className="absolute bottom-full left-0 right-0 mb-2 bg-neutral-800 border border-white/10 rounded-xl overflow-hidden shadow-2xl">
-                <div className="px-4 py-3 border-b border-white/10 flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-sm font-bold text-white flex-shrink-0">
-                    {initials}
-                  </div>
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-white truncate">{user?.full_name || 'Account'}</p>
-                    <p className="text-[10px] text-white/40 truncate">{user?.email}</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => { setShowUserMenu(false); setShowSettings(true); }}
-                  className="w-full flex items-center gap-2.5 px-4 py-3 text-sm text-white/70 hover:bg-white/5 hover:text-white transition"
-                >
-                  <Settings className="w-4 h-4" />
-                  Settings
-                </button>
-                <div className="h-px bg-white/10" />
-                <button
-                  onClick={() => { setShowUserMenu(false); onLogout(); }}
-                  className="w-full flex items-center gap-2.5 px-4 py-3 text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300 transition"
-                >
-                  <LogOut className="w-4 h-4" />
-                  Logout
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
+      {/* ── SIDEBAR — hidden on mobile unless open, always visible on sm+ ── */}
+      <aside className={`
+        fixed sm:relative inset-y-0 left-0 z-50 w-[230px] flex-shrink-0
+        bg-neutral-900 sm:bg-black/20 border-r border-white/10 flex flex-col
+        transition-transform duration-300 ease-in-out
+        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'}
+      `}>
+        <SidebarContent />
       </aside>
 
       {/* ── MAIN ── */}
-      <main className="flex-1 overflow-y-auto p-6 space-y-5">
-        <ReadingGoalModal
-          isOpen={showGoalModal}
-          onClose={() => setShowGoalModal(false)}
-          currentGoal={dailyGoal}
-          onSave={updateReadingGoal}
-          isLoading={isSavingGoal}
-        />
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
 
-        {/* UPLOAD TAB */}
-        {activeNav === 'upload' && (
-          <>
-            <div>
-              <h2 className="text-2xl font-bold">Upload Document</h2>
-              <p className="text-sm text-white/40 mt-0.5">Add a new document to your library</p>
-            </div>
-            {storage && (
-              <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-sm ${
-                nearFull ? 'bg-red-500/10 border-red-500/30 text-red-300' : 'bg-white/5 border-white/10 text-white/50'
-              }`}>
-                <HardDrive className="w-4 h-4 flex-shrink-0" />
-                <span>{usedMb.toFixed(1)} MB used of {limitMb.toFixed(0)} MB{nearFull && ' — storage nearly full'}</span>
-                <div className="flex-1 bg-white/10 rounded-full h-1.5 ml-2">
-                  <div className={`h-1.5 rounded-full ${nearFull ? 'bg-red-400' : 'bg-blue-400'}`} style={{ width: `${usedPct}%` }} />
-                </div>
-                <span className="flex-shrink-0">{usedPct.toFixed(0)}%</span>
-              </div>
-            )}
-            <div className="flex justify-center">
-              <div className="w-full max-w-2xl">{UploadCard}</div>
-            </div>
-          </>
-        )}
+        {/* ── MOBILE TOP BAR ── */}
+        <header className="sm:hidden flex items-center gap-3 px-4 py-3 border-b border-white/10 bg-neutral-900 flex-shrink-0">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="p-2 rounded-xl text-white/50 hover:text-white hover:bg-white/5 transition"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-white">{currentNavItem?.label || 'Dashboard'}</p>
+            <p className="text-[10px] text-white/30">ReadWithEase</p>
+          </div>
+          {/* Quick goal button on mobile header */}
+          <button
+            onClick={() => setShowGoalModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 border border-white/10 rounded-xl text-xs text-white/60"
+          >
+            <Target className="w-3 h-3" />
+            {dailyGoal}m
+          </button>
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-xs font-bold text-white flex-shrink-0">
+            {initials}
+          </div>
+        </header>
 
-        {/* OVERVIEW TAB */}
-        {activeNav === 'overview' && (
-          <>
-            <div className="flex items-center justify-between">
+        {/* ── SCROLLABLE CONTENT ── */}
+        <main className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 sm:space-y-5 pb-24 sm:pb-6">
+
+          {/* UPLOAD TAB */}
+          {activeNav === 'upload' && (
+            <>
               <div>
-                <h2 className="text-2xl font-bold">Your Reading Dashboard</h2>
-                <p className="text-sm text-white/40 mt-0.5">
-                  {new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
-                </p>
+                <h2 className="text-xl sm:text-2xl font-bold">Upload Document</h2>
+                <p className="text-sm text-white/40 mt-0.5">Add a new document to your library</p>
               </div>
-              <button
-                onClick={() => setShowGoalModal(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white/60 hover:bg-white/10 hover:text-white transition"
-              >
-                <Target className="w-4 h-4" />
-                Goal: {dailyGoal}m
-              </button>
-            </div>
-
-            {loading ? (
-              <div className="grid grid-cols-4 gap-3">{[0,1,2,3].map(i => <StatCardSkeleton key={i} />)}</div>
-            ) : <StatCards />}
-
-            <div className="w-[800px] ml-55">{UploadCard}</div>
-
-            {loading ? (
-              <div className="space-y-4">
-                <ChartSkeleton />
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-white/5 border border-white/10 rounded-2xl p-5 animate-pulse h-48" />
-                  <div className="bg-white/5 border border-white/10 rounded-2xl p-5 animate-pulse h-48" />
+              {storage && (
+                <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-sm ${
+                  nearFull ? 'bg-red-500/10 border-red-500/30 text-red-300' : 'bg-white/5 border-white/10 text-white/50'
+                }`}>
+                  <HardDrive className="w-4 h-4 flex-shrink-0" />
+                  <span className="text-xs sm:text-sm">{usedMb.toFixed(1)} MB of {limitMb.toFixed(0)} MB{nearFull && ' — nearly full'}</span>
+                  <div className="flex-1 bg-white/10 rounded-full h-1.5 ml-2">
+                    <div className={`h-1.5 rounded-full ${nearFull ? 'bg-red-400' : 'bg-blue-400'}`} style={{ width: `${usedPct}%` }} />
+                  </div>
                 </div>
+              )}
+              {UploadCard}
+            </>
+          )}
+
+          {/* OVERVIEW TAB */}
+          {activeNav === 'overview' && (
+            <>
+              {/* Desktop header */}
+              <div className="hidden sm:flex items-center justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold">Your Reading Dashboard</h2>
+                  <p className="text-sm text-white/40 mt-0.5">
+                    {new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowGoalModal(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white/60 hover:bg-white/10 hover:text-white transition"
+                >
+                  <Target className="w-4 h-4" />Goal: {dailyGoal}m
+                </button>
               </div>
-            ) : (
-              <>
-                <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
+
+              {loading ? (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[0,1,2,3].map(i => <StatCardSkeleton key={i} />)}
+                </div>
+              ) : <StatCards />}
+
+              {UploadCard}
+
+              {loading ? (
+                <div className="space-y-4">
+                  <ChartSkeleton />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 animate-pulse h-40" />
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 animate-pulse h-40" />
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* Chart */}
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-4 sm:p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <div>
+                        <p className="text-sm font-medium text-white/70">Daily reading time</p>
+                        <p className="text-[11px] text-white/30 mt-0.5">Last 14 days · minutes</p>
+                      </div>
+                      <div className="hidden sm:flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-sm bg-blue-400 opacity-40 inline-block" />
+                        <span className="text-[11px] text-white/30">Past</span>
+                        <span className="w-2.5 h-2.5 rounded-sm bg-blue-400 inline-block ml-3" />
+                        <span className="text-[11px] text-white/30">Today</span>
+                      </div>
+                    </div>
+                    <div style={{ height: 160 }}><Bar data={barChartData} options={barChartOpts} /></div>
+                  </div>
+
+                  {/* Recent docs + vocab — stack on mobile */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {/* Recent docs */}
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-4 sm:p-5">
+                      <div className="flex items-center justify-between mb-3">
+                        <p className="text-sm font-medium text-white/70">Recent documents</p>
+                        {documents.length > 0 && (
+                          <span className="text-[11px] text-white/30">
+                            {overviewSearch
+                              ? `${documents.filter(d => d.filename?.toLowerCase().includes(overviewSearch.toLowerCase())).length} of ${documents.length}`
+                              : `${Math.min(5, documents.length)} of ${documents.length}`}
+                          </span>
+                        )}
+                      </div>
+                      {documents.length > 0 && (
+                        <div className="relative mb-3">
+                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/25 pointer-events-none" />
+                          <input
+                            type="text"
+                            value={overviewSearch}
+                            onChange={e => setOverviewSearch(e.target.value)}
+                            placeholder="Search…"
+                            className="w-full bg-white/5 border border-white/10 rounded-xl pl-8 pr-7 py-2 text-xs text-white placeholder-white/25 outline-none focus:border-amber-500/40 transition"
+                          />
+                          {overviewSearch && (
+                            <button onClick={() => setOverviewSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/25">
+                              <X className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      <div className="space-y-1">
+                        {documents.length === 0 && (
+                          <p className="text-sm text-white/30 py-4 text-center">No documents yet.</p>
+                        )}
+                        {documents
+                          .filter(d => d.filename?.toLowerCase().includes(overviewSearch.toLowerCase()))
+                          .slice(0, 5)
+                          .map(doc => <DocButton key={doc.id || doc.document_id} doc={doc} query={overviewSearch} compact />)
+                        }
+                      </div>
+                      {documents.length > 5 && !overviewSearch && (
+                        <button
+                          onClick={() => setActiveNav('documents')}
+                          className="w-full mt-3 py-2 text-center text-[11px] text-amber-400 hover:text-amber-300 transition border-t border-white/10"
+                        >
+                          View all {documents.length} →
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Vocabulary preview */}
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-4 sm:p-5">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <BookMarked className="w-4 h-4 text-amber-400" />
+                          <p className="text-sm font-medium text-white/70">Recent Vocabulary</p>
+                        </div>
+                        <button
+                          onClick={() => { setActiveNav('vocabulary'); fetchVocabulary(); }}
+                          className="text-[11px] text-amber-400 hover:text-amber-300 transition"
+                        >
+                          View all
+                        </button>
+                      </div>
+                      {vocabulary.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-8 text-white/20">
+                          <BookMarked className="w-7 h-7 mb-2" />
+                          <p className="text-xs">No words looked up yet.</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {vocabulary.slice(0, 4).map(item => (
+                            <div key={item.word} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition">
+                              <div className="w-8 h-8 rounded-lg bg-amber-500/15 flex items-center justify-center text-sm flex-shrink-0">📖</div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-white">{item.word}</p>
+                                <p className="text-[11px] text-white/35 truncate">{item.meaning}</p>
+                              </div>
+                              <span className="text-[10px] text-white/25 flex-shrink-0">{timeAgo(item.looked_up_at)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {/* DOCUMENTS TAB */}
+          {activeNav === 'documents' && (
+            <>
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl sm:text-2xl font-bold">My Documents</h2>
+                <span className="text-xs sm:text-sm text-white/40">
+                  {docSearch ? `${filteredDocsTab.length} of ${documents.length}` : `${documents.length} total`}
+                </span>
+              </div>
+              <SearchBar value={docSearch} onChange={setDocSearch} placeholder="Search by filename…" autoFocus />
+              {loading ? (
+                <div className="space-y-2">{[1,2,3,4,5].map(i => <DocItemSkeleton key={i} />)}</div>
+              ) : (
+                <div className="space-y-2">
+                  {documents.length === 0 && (
+                    <div className="flex flex-col items-center justify-center py-20 text-center">
+                      <BookOpen className="w-12 h-12 text-white/20 mb-3" />
+                      <p className="text-white/40 text-sm">No documents yet.</p>
+                    </div>
+                  )}
+                  {documents.length > 0 && filteredDocsTab.length === 0 && (
+                    <div className="flex flex-col items-center justify-center py-20 text-center">
+                      <Search className="w-12 h-12 text-white/20 mb-3" />
+                      <p className="text-white/40 text-sm">No documents match "{docSearch}"</p>
+                      <button onClick={() => setDocSearch('')} className="mt-3 text-xs text-amber-400">Clear search</button>
+                    </div>
+                  )}
+                  {filteredDocsTab.map(doc => <DocButton key={doc.id || doc.document_id} doc={doc} query={docSearch} />)}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* VOCABULARY TAB */}
+          {activeNav === 'vocabulary' && (
+            <>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl sm:text-2xl font-bold">My Vocabulary</h2>
+                  <p className="text-sm text-white/40 mt-0.5">Words you've looked up</p>
+                </div>
+                <span className="text-xs sm:text-sm text-white/40">{vocabTotal} word{vocabTotal !== 1 ? 's' : ''}</span>
+              </div>
+              <div className="relative">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30 pointer-events-none" />
+                <input
+                  type="text"
+                  value={vocabSearch}
+                  onChange={e => { setVocabSearch(e.target.value); fetchVocabulary(1, e.target.value); }}
+                  placeholder="Search words…"
+                  className="w-full bg-white/5 border border-white/10 rounded-2xl pl-10 pr-9 py-3 text-sm text-white placeholder-white/25 outline-none focus:border-amber-500/50 transition"
+                />
+                {vocabSearch && (
+                  <button onClick={() => { setVocabSearch(''); fetchVocabulary(); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-white/30">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              {loading ? (
+                <div className="space-y-2">{[1,2,3,4,5].map(i => <VocabItemSkeleton key={i} />)}</div>
+              ) : (
+                <div className="space-y-2">
+                  {vocabulary.length === 0 && (
+                    <div className="flex flex-col items-center justify-center py-20 text-center">
+                      <BookMarked className="w-12 h-12 text-white/20 mb-3" />
+                      <p className="text-white/40 text-sm">No words looked up yet.</p>
+                      <p className="text-white/20 text-xs mt-1">Tap "Meaning" on any word while reading!</p>
+                    </div>
+                  )}
+                  {vocabulary.map(item => (
+                    <div key={item.word} className="rounded-2xl border border-white/10 bg-white/5 hover:border-white/20 transition">
+                      <div className="flex items-center gap-3 p-4">
+                        <div className="w-10 h-10 rounded-xl bg-amber-500/15 flex items-center justify-center text-base flex-shrink-0">📖</div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-white font-medium text-sm">{item.word}</span>
+                            {item.synonym && (
+                              <span className="text-[10px] text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-full">{item.synonym}</span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-white/35 mt-0.5 line-clamp-2">{item.meaning}</p>
+                        </div>
+                        <div className="text-right flex-shrink-0 ml-2">
+                          {item.document_name && <p className="text-[10px] text-white/30 truncate max-w-[80px]">{item.document_name}</p>}
+                          <p className="text-[10px] text-white/25 mt-0.5">{timeAgo(item.looked_up_at)}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!loading && vocabTotal > 20 && (
+                <div className="flex items-center justify-center gap-2 mt-4">
+                  <button
+                    onClick={() => fetchVocabulary(Math.max(1, vocabPage - 1), vocabSearch)}
+                    disabled={vocabPage === 1 || vocabLoading}
+                    className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white/60 hover:bg-white/10 disabled:opacity-30 transition"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-sm text-white/40">Page {vocabPage}</span>
+                  <button
+                    onClick={() => fetchVocabulary(vocabPage + 1, vocabSearch)}
+                    disabled={vocabPage * 20 >= vocabTotal || vocabLoading}
+                    className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white/60 hover:bg-white/10 disabled:opacity-30 transition"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* HISTORY TAB */}
+          {activeNav === 'history' && (
+            <>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl sm:text-2xl font-bold">Reading History</h2>
+                  <p className="text-sm text-white/40 mt-0.5">Last 14 days</p>
+                </div>
+                <button
+                  onClick={() => setShowGoalModal(true)}
+                  className="flex items-center gap-2 px-3 sm:px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-xs sm:text-sm text-white/60 hover:bg-white/10 hover:text-white transition"
+                >
+                  <Target className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                  <span className="hidden sm:inline">Goal: </span>{dailyGoal}m
+                </button>
+              </div>
+              {loading ? (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[0,1,2,3].map(i => <StatCardSkeleton key={i} />)}
+                </div>
+              ) : <StatCards />}
+              {loading ? <ChartSkeleton /> : (
+                <div className="bg-white/5 border border-white/10 rounded-2xl p-4 sm:p-5">
                   <div className="flex items-center justify-between mb-4">
                     <div>
                       <p className="text-sm font-medium text-white/70">Daily reading time</p>
                       <p className="text-[11px] text-white/30 mt-0.5">Last 14 days · minutes</p>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className="w-2.5 h-2.5 rounded-sm bg-blue-400 opacity-40 inline-block" />
-                      <span className="text-[11px] text-white/30">Past days</span>
-                      <span className="w-2.5 h-2.5 rounded-sm bg-blue-400 inline-block ml-3" />
-                      <span className="text-[11px] text-white/30">Today</span>
-                    </div>
                   </div>
-                  <div style={{ height: 190 }}><Bar data={barChartData} options={barChartOpts} /></div>
+                  <div style={{ height: 240 }}><Bar data={barChartData} options={barChartOpts} /></div>
                 </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  {/* Recent docs */}
-                  <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
-                    <div className="flex items-center justify-between mb-3">
-                      <p className="text-sm font-medium text-white/70">Recent documents</p>
-                      {documents.length > 0 && (
-                        <span className="text-[11px] text-white/30">
-                          {overviewSearch
-                            ? `${documents.filter(d => d.filename?.toLowerCase().includes(overviewSearch.toLowerCase())).length} of ${documents.length}`
-                            : `${Math.min(10, documents.length)} of ${documents.length}`}
-                        </span>
-                      )}
-                    </div>
-                    {documents.length > 0 && (
-                      <div className="relative mb-3">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/25 pointer-events-none" />
-                        <input
-                          type="text"
-                          value={overviewSearch}
-                          onChange={e => setOverviewSearch(e.target.value)}
-                          placeholder="Search recent docs…"
-                          className="w-full bg-white/5 border border-white/10 rounded-xl pl-8 pr-7 py-2 text-xs text-white placeholder-white/25 outline-none focus:border-amber-500/40 transition"
-                        />
-                        {overviewSearch && (
-                          <button onClick={() => setOverviewSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/25 hover:text-white/50 transition">
-                            <X className="w-3 h-3" />
-                          </button>
-                        )}
-                      </div>
-                    )}
-                    <div className="space-y-1">
-                      {documents.length === 0 && (
-                        <p className="text-sm text-white/30 py-4 text-center">No documents yet. Upload one above!</p>
-                      )}
-                      {documents.length > 0 && documents.filter(d => d.filename?.toLowerCase().includes(overviewSearch.toLowerCase())).length === 0 && (
-                        <div className="flex flex-col items-center py-6 text-center">
-                          <Search className="w-6 h-6 text-white/15 mb-2" />
-                          <p className="text-xs text-white/30">No documents match "{overviewSearch}"</p>
-                        </div>
-                      )}
-                      {documents
-                        .filter(d => d.filename?.toLowerCase().includes(overviewSearch.toLowerCase()))
-                        .slice(0, 10)
-                        .map(doc => <DocButton key={doc.id || doc.document_id} doc={doc} query={overviewSearch} compact />)
-                      }
-                    </div>
-                    {documents.length > 10 && !overviewSearch && (
-                      <button
-                        onClick={() => setActiveNav('documents')}
-                        className="w-full mt-3 py-2 text-center text-[11px] text-amber-400 hover:text-amber-300 transition border-t border-white/10"
-                      >
-                        View all {documents.length} documents →
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Vocabulary preview */}
-                  <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <BookMarked className="w-4 h-4 text-amber-400" />
-                        <p className="text-sm font-medium text-white/70">Recent Vocabulary</p>
-                      </div>
-                      <button
-                        onClick={() => { setActiveNav('vocabulary'); fetchVocabulary(); }}
-                        className="text-[11px] text-amber-400 hover:text-amber-300 transition"
-                      >
-                        View all
-                      </button>
-                    </div>
-                    {vocabulary.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center py-10 text-white/20">
-                        <BookMarked className="w-7 h-7 mb-2" />
-                        <p className="text-xs">No words looked up yet.</p>
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        {vocabulary.slice(0, 5).map(item => (
-                          <div key={item.word} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition">
-                            <div className="w-8 h-8 rounded-lg bg-amber-500/15 flex items-center justify-center text-sm flex-shrink-0">📖</div>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium text-white">{item.word}</p>
-                              <p className="text-[11px] text-white/35 truncate">{item.meaning}</p>
-                            </div>
-                            <span className="text-[10px] text-white/25">{timeAgo(item.looked_up_at)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-          </>
-        )}
-
-        {/* DOCUMENTS TAB */}
-        {activeNav === 'documents' && (
-          <>
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold">My Documents</h2>
-              <span className="text-sm text-white/40">
-                {docSearch
-                  ? `${filteredDocsTab.length} of ${documents.length} document${documents.length !== 1 ? 's' : ''}`
-                  : `${documents.length} document${documents.length !== 1 ? 's' : ''}`}
-              </span>
-            </div>
-            <SearchBar value={docSearch} onChange={setDocSearch} placeholder="Search by filename…" autoFocus />
-            {loading ? (
-              <div className="space-y-2">{[1,2,3,4,5].map(i => <DocItemSkeleton key={i} />)}</div>
-            ) : (
-              <div className="space-y-2">
-                {documents.length === 0 && (
-                  <div className="flex flex-col items-center justify-center py-20 text-center">
-                    <BookOpen className="w-12 h-12 text-white/20 mb-3" />
-                    <p className="text-white/40 text-sm">No documents yet.</p>
-                  </div>
-                )}
-                {documents.length > 0 && filteredDocsTab.length === 0 && (
-                  <div className="flex flex-col items-center justify-center py-20 text-center">
-                    <Search className="w-12 h-12 text-white/20 mb-3" />
-                    <p className="text-white/40 text-sm">No documents match "{docSearch}"</p>
-                    <button onClick={() => setDocSearch('')} className="mt-3 text-xs text-amber-400 hover:text-amber-300 transition">Clear search</button>
-                  </div>
-                )}
-                {filteredDocsTab.map(doc => <DocButton key={doc.id || doc.document_id} doc={doc} query={docSearch} />)}
-              </div>
-            )}
-          </>
-        )}
-
-        {/* VOCABULARY TAB */}
-        {activeNav === 'vocabulary' && (
-          <>
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-2xl font-bold">My Vocabulary</h2>
-                <p className="text-sm text-white/40 mt-0.5">Words you've looked up while reading</p>
-              </div>
-              <span className="text-sm text-white/40">{vocabTotal} word{vocabTotal !== 1 ? 's' : ''}</span>
-            </div>
-            <div className="relative mb-4">
-              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30 pointer-events-none" />
-              <input
-                type="text"
-                value={vocabSearch}
-                onChange={e => { setVocabSearch(e.target.value); fetchVocabulary(1, e.target.value); }}
-                placeholder="Search words, meanings, or documents…"
-                className="w-full bg-white/5 border border-white/10 rounded-2xl pl-10 pr-9 py-3 text-sm text-white placeholder-white/25 outline-none focus:border-amber-500/50 transition"
-              />
-              {vocabSearch && (
-                <button onClick={() => { setVocabSearch(''); fetchVocabulary(); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 transition">
-                  <X className="w-3.5 h-3.5" />
-                </button>
               )}
-            </div>
-            {loading ? (
-              <div className="space-y-2">{[1,2,3,4,5].map(i => <VocabItemSkeleton key={i} />)}</div>
-            ) : (
-              <div className="space-y-2">
-                {vocabulary.length === 0 && (
-                  <div className="flex flex-col items-center justify-center py-20 text-center">
-                    <BookMarked className="w-12 h-12 text-white/20 mb-3" />
-                    <p className="text-white/40 text-sm">No words looked up yet.</p>
-                    <p className="text-white/20 text-xs mt-1">Start reading and click "Meaning" on any word!</p>
-                  </div>
-                )}
-                {vocabulary.map(item => (
-                  <div key={item.word} className="rounded-2xl overflow-hidden border border-white/10 bg-white/5 hover:border-white/20 transition">
-                    <div className="flex items-center gap-4 p-4">
-                      <div className="w-11 h-11 rounded-xl bg-amber-500/15 flex items-center justify-center text-lg flex-shrink-0">📖</div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-white font-medium">{item.word}</span>
-                          {item.synonym && (
-                            <span className="text-[10px] text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-full">{item.synonym}</span>
-                          )}
-                        </div>
-                        <p className="text-[11px] text-white/35 mt-0.5 line-clamp-2">{item.meaning}</p>
-                      </div>
-                      <div className="text-right flex-shrink-0">
-                        {item.document_name && <p className="text-xs text-white/40">{item.document_name}</p>}
-                        <p className="text-[10px] text-white/25 mt-0.5">{timeAgo(item.looked_up_at)}</p>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {!loading && vocabTotal > 20 && (
-              <div className="flex items-center justify-center gap-2 mt-4">
-                <button
-                  onClick={() => fetchVocabulary(Math.max(1, vocabPage - 1), vocabSearch)}
-                  disabled={vocabPage === 1 || vocabLoading}
-                  className="px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-white/60 hover:bg-white/10 disabled:opacity-30 transition"
-                >
-                  Previous
-                </button>
-                <span className="text-sm text-white/40">Page {vocabPage}</span>
-                <button
-                  onClick={() => fetchVocabulary(vocabPage + 1, vocabSearch)}
-                  disabled={vocabPage * 20 >= vocabTotal || vocabLoading}
-                  className="px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-white/60 hover:bg-white/10 disabled:opacity-30 transition"
-                >
-                  Next
-                </button>
-              </div>
-            )}
-          </>
-        )}
+            </>
+          )}
+        </main>
 
-        {/* HISTORY TAB */}
-        {activeNav === 'history' && (
-          <>
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-2xl font-bold">Reading History</h2>
-                <p className="text-sm text-white/40 mt-0.5">Your reading activity over the last 14 days</p>
+        {/* ── MOBILE BOTTOM NAV ── */}
+        <nav className="sm:hidden flex-shrink-0 border-t border-white/10 bg-neutral-900 flex items-center justify-around px-2 py-2 safe-area-inset-bottom">
+          {NAV_ITEMS.map(({ id, icon: Icon, label }) => (
+            <button
+              key={id}
+              onClick={() => handleNavChange(id)}
+              className={`flex flex-col items-center gap-1 px-3 py-1.5 rounded-xl transition-all min-w-0 ${
+                activeNav === id ? 'text-white' : 'text-white/35'
+              }`}
+            >
+              <div className={`p-1.5 rounded-xl transition-all ${activeNav === id ? 'bg-white/10' : ''}`}>
+                <Icon className="w-5 h-5" />
               </div>
-              <button
-                onClick={() => setShowGoalModal(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-sm text-white/60 hover:bg-white/10 hover:text-white transition"
-              >
-                <Target className="w-4 h-4" />
-                Goal: {dailyGoal}m
-              </button>
-            </div>
-            {loading ? (
-              <div className="grid grid-cols-4 gap-3">{[0,1,2,3].map(i => <StatCardSkeleton key={i} />)}</div>
-            ) : <StatCards />}
-            {loading ? <ChartSkeleton /> : (
-              <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <p className="text-sm font-medium text-white/70">Daily reading time</p>
-                    <p className="text-[11px] text-white/30 mt-0.5">Last 14 days · minutes</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-blue-400 opacity-40 inline-block" />
-                    <span className="text-[11px] text-white/30">Past days</span>
-                    <span className="w-2.5 h-2.5 rounded-sm bg-blue-400 inline-block ml-3" />
-                    <span className="text-[11px] text-white/30">Today</span>
-                  </div>
-                </div>
-                <div style={{ height: 340 }}><Bar data={barChartData} options={barChartOpts} /></div>
-              </div>
-            )}
-          </>
-        )}
-      </main>
+              <span className="text-[9px] font-medium leading-none">{label}</span>
+            </button>
+          ))}
+        </nav>
+      </div>
     </div>
   );
 };

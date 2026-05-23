@@ -2,12 +2,11 @@ import { motion } from "framer-motion";
 
 const AnimatedTitle = ({ text }) => {
   const words = text.replace(/<<br>/, " ").split(" ");
-
   const accentWords = ["Read,", "Understand", "Summarize"];
 
   return (
     <motion.h1
-      className="font-['Cormorant_Garamond'] text-[clamp(2.5rem,6vw,4.5rem)] font-semibold tracking-[0.02em] leading-[1.15] mb-6 max-w-[900px] flex flex-wrap justify-center gap-x-[0.4em]"
+      className="font-['Cormorant_Garamond'] text-[clamp(2rem,7vw,4.5rem)] font-semibold tracking-[0.02em] leading-[1.15] mb-4 sm:mb-6 max-w-[900px] flex flex-wrap justify-center gap-x-[0.35em]"
       style={{ color: "#F5F0E8" }}
       initial="hidden"
       animate="visible"
@@ -46,13 +45,13 @@ const StatsBar = () => {
 
   return (
     <motion.div
-      className="relative z-10 flex justify-center px-8 pb-12"
+      className="relative z-10 flex justify-center px-4 sm:px-8 pb-8 sm:pb-12"
       initial={{ opacity: 0, y: 30 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 2.2, duration: 0.8 }}
     >
       <div
-        className="flex items-center justify-center rounded-2xl px-12 py-6 gap-0"
+        className="flex items-center justify-center rounded-2xl px-4 sm:px-12 py-4 sm:py-6 gap-0 w-full max-w-[480px] sm:w-auto"
         style={{
           background: "rgba(13,13,13,0.55)",
           backdropFilter: "blur(20px) saturate(1.4)",
@@ -65,23 +64,23 @@ const StatsBar = () => {
         {stats.map((stat, index) => (
           <div
             key={index}
-            className="flex flex-col items-center px-10 relative"
+            className="flex flex-col items-center flex-1 sm:flex-none sm:px-10 px-3 relative"
           >
             {/* Divider */}
             {index !== stats.length - 1 && (
               <span
-                className="absolute right-0 top-1/2 -translate-y-1/2 w-px h-8"
+                className="absolute right-0 top-1/2 -translate-y-1/2 w-px h-6 sm:h-8"
                 style={{ background: "rgba(201,168,76,0.25)" }}
               />
             )}
             <span
-              className="font-['Inter'] text-[clamp(1.6rem,2.5vw,2rem)] font-semibold leading-none mb-1.5"
+              className="font-['Inter'] text-[clamp(1.2rem,4vw,2rem)] font-semibold leading-none mb-1 sm:mb-1.5"
               style={{ color: "#C9A84C" }}
             >
               {stat.icon}
             </span>
             <span
-              className="font-['Inter'] text-[9px] tracking-[0.18em] uppercase leading-relaxed text-center whitespace-nowrap"
+              className="font-['Inter'] text-[8px] sm:text-[9px] tracking-[0.14em] sm:tracking-[0.18em] uppercase leading-relaxed text-center whitespace-nowrap"
               style={{ color: "rgba(245,240,232,0.55)" }}
             >
               {stat.label}
@@ -119,11 +118,11 @@ const Picture = ({ title, desc, img }) => {
       />
 
       {/* Main content */}
-      <div className="relative z-[2] flex flex-col items-center justify-center text-center min-h-[75vh] px-8 pt-16 pb-6">
+      <div className="relative z-[2] flex flex-col items-center justify-center text-center min-h-[85vh] sm:min-h-[75vh] px-4 sm:px-8 pt-12 sm:pt-16 pb-4 sm:pb-6">
         <AnimatedTitle text={title} />
 
         <motion.p
-          className="font-['Cormorant_Garamond'] text-[clamp(1.1rem,2.5vw,1.5rem)] font-normal italic tracking-[0.04em] mb-10 max-w-[520px] leading-relaxed"
+          className="font-['Cormorant_Garamond'] text-[clamp(1rem,3.5vw,1.5rem)] font-normal italic tracking-[0.04em] mb-8 sm:mb-10 max-w-[520px] leading-relaxed px-2 sm:px-0"
           style={{ color: "rgba(245,240,232,0.55)" }}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -134,13 +133,13 @@ const Picture = ({ title, desc, img }) => {
 
         {/* Buttons */}
         <motion.div
-          className="flex items-center gap-4 mb-10"
+          className="flex items-center justify-center gap-4 mb-8 sm:mb-10 w-full px-6 sm:px-0 sm:w-auto"
           initial={{ opacity: 0, scale: 0.9 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 1.3, duration: 0.8 }}
         >
           <motion.button
-            className="font-['Inter'] text-s tracking-[0.14em] font-semibold rounded-full px-8 py-3 cursor-pointer whitespace-nowrap transition-all duration-200"
+            className="font-['Inter'] text-s tracking-[0.14em] font-semibold rounded-full px-8 py-3 cursor-pointer whitespace-nowrap transition-all duration-200 w-full sm:w-auto"
             style={{
               color: "#F5F0E8",
               background: "transparent",
@@ -161,8 +160,6 @@ const Picture = ({ title, desc, img }) => {
           >
             Get Started
           </motion.button>
-
-          
         </motion.div>
       </div>
 
@@ -173,8 +170,8 @@ const Picture = ({ title, desc, img }) => {
 
 const HeroSection = () => {
   return (
-    <div className="px-6 py-1">
-      <div className="rounded-3xl overflow-hidden">
+    <div className="px-3 sm:px-6 py-1">
+      <div className="rounded-2xl sm:rounded-3xl overflow-hidden">
         <Picture
           title="Read, Understand and Summarize"
           desc="Your AI Powered Reading Companion"

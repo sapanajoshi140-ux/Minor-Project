@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import PdfViewer   from './PdfViewer';
 import ChatPanel   from './ChatPanel';
@@ -15,7 +14,6 @@ const RAG_API_URL = import.meta.env.VITE_RAG_API_URL      || 'http://localhost:8
 const getRagHeaders = () => ({
   'Authorization': `Bearer ${localStorage.getItem('access_token') || ''}`,
 });
-const resolveDocId = (obj) => obj?.document_id || obj?.id || null;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Workspace
@@ -27,32 +25,89 @@ const Workspace = ({
   documentName,
   apiUrl,
   authHeaders,
-  onBack,         // (sessionMins: number) => void
+  onBack,
   onAuthError,
+  sessionId,
 }) => {
   const BASE = apiUrl || DOC_API_URL;
 
-  // ── NEW: Session time tracking ────────────────────────────────────────────
-  const startTimeRef = useRef(Date.now());
+  // ── Refs ──────────────────────────────────────────────────────────────────
+  const startTimeRef       = useRef(Date.now());
+  const activeSecsRef      = useRef(0);
+  const lastActivityRef    = useRef(Date.now());
+  const activityTimerRef   = useRef(null);
+  const heartbeatTimerRef  = useRef(null);
+  const INACTIVITY_TIMEOUT = 5 * 60 * 1000;
+  const pagesRef           = useRef([]);
+  const pageRefs           = useRef({});
 
-  // Call this instead of onBack() everywhere so session minutes are always passed
+  // ── 1. guardedHeaders — defined FIRST, used everywhere ───────────────────
+  const guardedHeaders = useCallback(() => {
+    const h = getFreshHeaders();
+    if (!isValidHeaders(h)) { onAuthError(); return null; }
+    return h;
+  }, [onAuthError]);
+
+  // ── 2. tickActiveTime ─────────────────────────────────────────────────────
+  const tickActiveTime = useCallback(() => {
+    const now = Date.now();
+    const sinceActivity = now - lastActivityRef.current;
+    if (sinceActivity < INACTIVITY_TIMEOUT) {
+      activeSecsRef.current += 30;
+    }
+  }, []);
+
+  const recordActivity = useCallback(() => {
+    lastActivityRef.current = Date.now();
+  }, []);
+
+  // ── 3. handleBack ─────────────────────────────────────────────────────────
   const handleBack = useCallback(() => {
-    const sessionMins = (Date.now() - startTimeRef.current) / 60_000;
-    onBack(sessionMins);
-  }, [onBack]);
+    tickActiveTime();
+    onBack(activeSecsRef.current);
+  }, [onBack, tickActiveTime]);
 
-  // Also capture time on browser back-button navigation
+  // ── 4. Heartbeat effect ───────────────────────────────────────────────────
+  useEffect(() => {
+    const events = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
+    events.forEach(e => window.addEventListener(e, recordActivity, { passive: true }));
+
+    heartbeatTimerRef.current = setInterval(async () => {
+      tickActiveTime();
+      if (!sessionId) return;
+      const headers = guardedHeaders();
+      if (!headers) return;
+      try {
+        await fetch(`${BASE}/reading-session/heartbeat`, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            active_seconds: activeSecsRef.current,
+          }),
+        });
+      } catch (err) {
+        console.error('Heartbeat failed:', err);
+      }
+    }, 30_000);
+
+    return () => {
+      events.forEach(e => window.removeEventListener(e, recordActivity));
+      clearInterval(heartbeatTimerRef.current);
+    };
+  }, [sessionId, BASE, guardedHeaders, tickActiveTime, recordActivity]);
+
+  // ── 5. popstate effect ────────────────────────────────────────────────────
   useEffect(() => {
     const onPopState = () => {
-      const sessionMins = (Date.now() - startTimeRef.current) / 60_000;
-      onBack(sessionMins);
+      tickActiveTime();
+      onBack(activeSecsRef.current);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, [onBack]);
-  // ─────────────────────────────────────────────────────────────────────────
+  }, [onBack, tickActiveTime]);
 
-  // ─ State
+  // ── State ─────────────────────────────────────────────────────────────────
   const [pages,           setPages]           = useState([]);
   const [currentPage,     setCurrentPage]     = useState(0);
   const currentPageRef                        = useRef(0);
@@ -72,6 +127,10 @@ const Workspace = ({
   const [pdfGenStatus,    setPdfGenStatus]     = useState('');
   const [pdfGenMessage,   setPdfGenMessage]    = useState('');
 
+  // ── PDF ready modal state ─────────────────────────────────────────────────
+  const [pdfReadyModal,   setPdfReadyModal]   = useState(false);
+  const [generatedPdfUrl, setGeneratedPdfUrl] = useState('');
+
   const [dirtyPages,     setDirtyPages]     = useState(new Set());
   const [isBulkSaving,   setIsBulkSaving]   = useState(false);
   const [bulkSaveStatus, setBulkSaveStatus] = useState('');
@@ -83,7 +142,6 @@ const Workspace = ({
   const [lengthPicker,    setLengthPicker]    = useState(false);
   const [pageLoadError,   setPageLoadError]   = useState(false);
 
-  // ── Page notes — unified across ALL document types ────────────────────────
   const [pageNotes,       setPageNotes]       = useState({});
   const [openNotePageNum, setOpenNotePageNum] = useState(null);
 
@@ -91,28 +149,55 @@ const Workspace = ({
 
   const isTextDoc = documentCategory === 'text';
   const hasMore   = currentPage < totalPages;
-  const [chatWidth, setChatWidth] = useState(380);
-  const isResizing = useRef(false);
-  // ── Auth guard ─────────────────────────────────────────────────────────────
-  const guardedHeaders = useCallback(() => {
-    const h = getFreshHeaders();
-    if (!isValidHeaders(h)) { onAuthError(); return null; }
-    return h;
-  }, [onAuthError]);
 
-const saveNote = useCallback(async (pageNum, text) => {
-  const headers = guardedHeaders();
-  if (!headers) return;
-  const res = await fetch(`${BASE}/documents/${documentId}/pages/${pageNum}/note`, {
-    method: 'PUT',
-    headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ note_text: text }),
-  });
-  if (res.status === 401) { onAuthError(); throw new Error('Unauthorized'); }
-  if (!res.ok) throw new Error('Failed to save note');
-}, [BASE, documentId, guardedHeaders, onAuthError]);
+  // ── Mobile: which panel is active on small screens ───────────────────────
+  // 'doc' = document view, 'chat' = chat panel
+  const [mobileTab, setMobileTab] = useState('doc');
+  // Detect mobile
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
 
-  // ── Document metadata ──────────────────────────────────────────────────────
+  // Chat panel width: 520 on desktop, full width on mobile
+  const CHAT_WIDTH = isMobile ? window.innerWidth : 520;
+
+  // ── OCR Formatting state ──────────────────────────────────────────────────
+  const [fmtSummary, setFmtSummary] = useState(null);
+  const [fmtPolling, setFmtPolling] = useState(false);
+  const fmtPollRef = useRef(null);
+  const [showFmtDone, setShowFmtDone] = useState(false);
+  const fmtWasAlreadyDoneRef = useRef(false);
+
+  useEffect(() => {
+    if (!fmtSummary?.all_done) return;
+    if (fmtWasAlreadyDoneRef.current) return;
+    fmtWasAlreadyDoneRef.current = true;
+    if (!fmtPolling) return;
+    setShowFmtDone(true);
+    const id = setTimeout(() => setShowFmtDone(false), 4000);
+    return () => clearTimeout(id);
+  }, [fmtSummary?.all_done, fmtPolling]);
+
+  const pollFormattingStatusRef = useRef(null);
+
+  // ── saveNote ──────────────────────────────────────────────────────────────
+  const saveNote = useCallback(async (pageNum, text) => {
+    const headers = guardedHeaders();
+    if (!headers) return;
+    const res = await fetch(`${BASE}/documents/${documentId}/pages/${pageNum}/note`, {
+      method: 'PUT',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note_text: text }),
+    });
+    if (res.status === 401) { onAuthError(); throw new Error('Unauthorized'); }
+    if (!res.ok) throw new Error('Failed to save note');
+  }, [BASE, documentId, guardedHeaders, onAuthError]);
+
+  // ── Document metadata ─────────────────────────────────────────────────────
   const fetchDocumentMeta = useCallback(async () => {
     const headers = guardedHeaders();
     if (!headers) return;
@@ -128,26 +213,147 @@ const saveNote = useCallback(async (pageNum, text) => {
     }
   }, [documentId, BASE, guardedHeaders, onAuthError]);
 
-  useEffect(() => { fetchDocumentMeta(); }, []);
+  // ── Unified view ──────────────────────────────────────────────────────────
+  const fetchDocumentView = useCallback(async () => {
+    const headers = guardedHeaders();
+    if (!headers) return false;
+    try {
+      const res = await fetch(`${BASE}/documents/${documentId}/view`, { headers });
+      if (res.status === 401) { onAuthError(); return false; }
+      if (!res.ok) return false;
+      const data = await res.json();
 
-  useEffect(() => {
-  const loadNotes = async () => {
+      setDocMeta({
+        filename:          data.filename,
+        total_pages:       data.total_pages,
+        document_category: data.document_category,
+        processing_status: data.processing_status,
+      });
+      if (data.total_pages) setTotalPages(data.total_pages);
+
+      if (data.formatting_summary) {
+        setFmtSummary(data.formatting_summary);
+        if (!data.formatting_summary.all_done) {
+          clearInterval(fmtPollRef.current);
+          fmtPollRef.current = setInterval(
+            () => pollFormattingStatusRef.current?.(),
+            4000,
+          );
+          setFmtPolling(true);
+        } else {
+          clearInterval(fmtPollRef.current);
+          setFmtPolling(false);
+        }
+      }
+
+      if (data.pdf_url) {
+        const token = getToken();
+        setPdfUrl(`${BASE}${data.pdf_url}?token=${encodeURIComponent(token)}`);
+        setGeneratedPdfUrl(`${BASE}${data.pdf_url}?token=${encodeURIComponent(token)}`);
+      }
+
+      if (data.ocr_lines?.length) {
+        const pageMap = {};
+        for (const line of data.ocr_lines) {
+          const pn = line.page_number;
+          if (!pageMap[pn]) {
+            pageMap[pn] = {
+              page_number:       pn,
+              extracted_text:    '',
+              formatting_status: line.formatting_status,
+            };
+          }
+          pageMap[pn].extracted_text += line.text + '\n';
+        }
+        const pageList = Object.values(pageMap).sort((a, b) => a.page_number - b.page_number);
+        setPages(pageList);
+
+        const lastPage = pageList[pageList.length - 1].page_number;
+        currentPageRef.current = lastPage;
+        setCurrentPage(lastPage);
+        return true;
+      }
+
+      return false;
+    } catch (err) {
+      console.error('Failed to fetch document view:', err);
+      return false;
+    }
+  }, [BASE, documentId, guardedHeaders, onAuthError]);
+
+  // ── OCR formatting status polling ─────────────────────────────────────────
+  const pollFormattingStatus = useCallback(async () => {
     const headers = guardedHeaders();
     if (!headers) return;
     try {
-      const res = await fetch(`${BASE}/documents/${documentId}/notes`, { headers });
+      const res = await fetch(`${BASE}/document/${documentId}/formatting-status`, { headers });
       if (!res.ok) return;
       const data = await res.json();
-      const map = {};
-      (data.notes || []).forEach(n => { map[n.page_number] = n.note_text; });
-      setPageNotes(map);
-    } catch (err) {
-      console.error('Failed to load notes:', err);
-    }
-  };
-  loadNotes();
-}, [documentId]);
+      setFmtSummary(data.summary);
 
+      if (data.summary.all_done) {
+        setFmtPolling(false);
+        clearInterval(fmtPollRef.current);
+        fetchDocumentView();
+      }
+    } catch (err) {
+      console.error('Formatting status poll failed:', err);
+    }
+  }, [BASE, documentId, guardedHeaders, fetchDocumentView]);
+
+  useEffect(() => {
+    pollFormattingStatusRef.current = pollFormattingStatus;
+  }, [pollFormattingStatus]);
+
+  useEffect(() => {
+    return () => clearInterval(fmtPollRef.current);
+  }, []);
+
+  useEffect(() => { pagesRef.current = pages; }, [pages]);
+
+  useEffect(() => {
+    if (isTextDoc) return;
+    const observers = [];
+
+    pages.forEach((page) => {
+      const el = pageRefs.current[page.page_number];
+      if (!el) return;
+
+      const obs = new IntersectionObserver(
+        ([entry]) => {
+          if (entry.isIntersecting) {
+            setCurrentPage(page.page_number);
+          }
+        },
+        { threshold: 0.3 }
+      );
+      obs.observe(el);
+      observers.push(obs);
+    });
+
+    return () => observers.forEach(obs => obs.disconnect());
+  }, [pages, isTextDoc]);
+
+  // ── Load notes ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const loadNotes = async () => {
+      const headers = guardedHeaders();
+      if (!headers) return;
+      try {
+        const res = await fetch(`${BASE}/documents/${documentId}/notes`, { headers });
+        if (!res.ok) return;
+        const data = await res.json();
+        const map = {};
+        (data.notes || []).forEach(n => { map[n.page_number] = n.note_text; });
+        setPageNotes(map);
+      } catch (err) {
+        console.error('Failed to load notes:', err);
+      }
+    };
+    loadNotes();
+  }, [documentId, BASE, guardedHeaders]);
+
+  // ── Text document: PDF URL ────────────────────────────────────────────────
   useEffect(() => {
     if (isTextDoc) {
       const token = getToken();
@@ -160,7 +366,7 @@ const saveNote = useCallback(async (pageNum, text) => {
     window.speechSynthesis?.cancel();
   }, []);
 
-  // ── Auto-dismiss toasts ────────────────────────────────────────────────────
+  // ── Auto-dismiss toasts ───────────────────────────────────────────────────
   useEffect(() => {
     if (!bulkSaveStatus) return;
     const id = setTimeout(() => setBulkSaveStatus(''), 3000);
@@ -170,33 +376,15 @@ const saveNote = useCallback(async (pageNum, text) => {
   useEffect(() => {
     if (!pdfGenStatus) return;
     const id = setTimeout(() => { setPdfGenStatus(''); setPdfGenMessage(''); }, 4000);
-    return () => clearTimeout(id);
   }, [pdfGenStatus]);
 
-  // ── Save single page ───────────────────────────────────────────────────────
-  const handleContentChange = async (pageNum, newText) => {
+  // ── Save single page ──────────────────────────────────────────────────────
+  const handleContentChange = (pageNum, newText) => {
     setPages(prev => prev.map(p => p.page_number === pageNum ? { ...p, extracted_text: newText } : p));
     setDirtyPages(prev => new Set(prev).add(pageNum));
-
-    const headers = guardedHeaders();
-    if (!headers) return;
-
-    try {
-      const res = await fetch(`${BASE}/document/${documentId}/page/${pageNum}`, {
-        method: 'PUT',
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ extracted_text: newText }),
-      });
-      if (res.status === 401) { onAuthError(); return; }
-      if (res.ok) {
-        setDirtyPages(prev => { const n = new Set(prev); n.delete(pageNum); return n; });
-      }
-    } catch (err) {
-      console.error('Failed to save edit:', err);
-    }
   };
 
-  // ── Bulk save ──────────────────────────────────────────────────────────────
+  // ── Bulk save ─────────────────────────────────────────────────────────────
   const handleBulkSave = useCallback(async () => {
     if (dirtyPages.size === 0) return;
     setIsBulkSaving(true);
@@ -236,7 +424,7 @@ const saveNote = useCallback(async (pageNum, text) => {
     }
   }, [dirtyPages, pages, documentId, BASE, guardedHeaders, onAuthError]);
 
-  // ── Generate PDF ───────────────────────────────────────────────────────────
+  // ── Generate PDF ──────────────────────────────────────────────────────────
   const handleGeneratePdf = async () => {
     setIsGeneratingPdf(true);
     const headers = guardedHeaders();
@@ -251,11 +439,14 @@ const saveNote = useCallback(async (pageNum, text) => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'PDF generation failed.');
 
+      const token = getToken();
+      const newPdfUrl = `${BASE}/document/${documentId}/pdf?token=${encodeURIComponent(token)}&t=${Date.now()}`;
+
+      setPdfUrl(newPdfUrl);
+      setGeneratedPdfUrl(newPdfUrl);
+      setPdfReadyModal(true);
       setPdfGenStatus('success');
       setPdfGenMessage(data.message || 'PDF generated successfully.');
-
-      const token = getToken();
-      setPdfUrl(`${BASE}/document/${documentId}/pdf?token=${encodeURIComponent(token)}&t=${Date.now()}`);
     } catch (err) {
       setPdfGenStatus('error');
       setPdfGenMessage(err.message || 'Failed to generate PDF.');
@@ -264,8 +455,30 @@ const saveNote = useCallback(async (pageNum, text) => {
     }
   };
 
-  // ── NDJSON streaming ───────────────────────────────────────────────────────
+  // ── Reformat ──────────────────────────────────────────────────────────────
+  const handleReformat = async () => {
+    const headers = guardedHeaders();
+    if (!headers) return;
+    try {
+      await fetch(`${BASE}/document/${documentId}/reformat`, { method: 'POST', headers });
+      setFmtPolling(true);
+      clearInterval(fmtPollRef.current);
+      fmtPollRef.current = setInterval(
+        () => pollFormattingStatusRef.current?.(),
+        4000,
+      );
+    } catch (err) {
+      console.error('Reformat request failed:', err);
+    }
+  };
+
+  // ── NDJSON streaming ──────────────────────────────────────────────────────
   const fetchPageStreaming = useCallback(async (pageNum) => {
+    const alreadyLoaded = pagesRef.current.find(
+      p => p.page_number === pageNum && p.extracted_text?.trim()
+    );
+    if (alreadyLoaded) return true;
+
     const headers = guardedHeaders();
     if (!headers) return null;
 
@@ -391,6 +604,12 @@ const saveNote = useCallback(async (pageNum, text) => {
 
     try {
       const nextPage = currentPageRef.current + 1;
+      if (pagesRef.current.find(p => p.page_number === nextPage && p.extracted_text?.trim())) {
+        currentPageRef.current = nextPage;
+        setCurrentPage(nextPage);
+        setIsLoadingMore(false);
+        return;
+      }
 
       const streamed = await fetchPageStreaming(nextPage);
       if (streamed === null) {
@@ -428,11 +647,21 @@ const saveNote = useCallback(async (pageNum, text) => {
     setIsLoadingMore(false);
   }, [isLoadingMore, totalPages, fetchPageStreaming, fetchPage, prefetchPageBatch]);
 
-  useEffect(() => { if (!isTextDoc) loadNextPage(); }, []);
+  // ── Initial load ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (isTextDoc) return;
+    fetchDocumentView().then((hasData) => {
+      if (!hasData) {
+        fetchDocumentMeta();
+        loadNextPage();
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const bottomRef = useBottomInfiniteScroll(loadNextPage, !isTextDoc && currentPage > 0);
+  const bottomRef = useBottomInfiniteScroll(loadNextPage, !isTextDoc && hasMore);
 
-  // ── Text-selection → floating menu ────────────────────────────────────────
+  // ── Text-selection → floating menu ───────────────────────────────────────
   const handleMouseUp = (e) => {
     if (
       e.target.closest('.floating-menu') ||
@@ -501,7 +730,7 @@ const saveNote = useCallback(async (pageNum, text) => {
     }
   };
 
-  // ── Meaning ────────────────────────────────────────────────────────────────
+  // ── Meaning ───────────────────────────────────────────────────────────────
   const handleMeaningClick = async (e) => {
     e.stopPropagation();
     setMenuConfig(prev => ({ ...prev, show: false }));
@@ -521,7 +750,7 @@ const saveNote = useCallback(async (pageNum, text) => {
           data.meaning,
           data.synonym ? `Synonym: ${data.synonym}` : '',
           data.example ? `Example: ${data.example}` : '',
-        ].filter(Boolean).join('\n\n');
+        ].filter(Boolean).join('\n');
         setMeaningPopup(prev => ({ ...prev, loading: false, result }));
         return;
       }
@@ -544,7 +773,7 @@ const saveNote = useCallback(async (pageNum, text) => {
     }
   };
 
-  // ── Summarize ──────────────────────────────────────────────────────────────
+  // ── Summarize ─────────────────────────────────────────────────────────────
   const handleSummaryClick = (e) => { e.stopPropagation(); setLengthPicker(prev => !prev); };
 
   const fireSummarize = async (length) => {
@@ -552,6 +781,8 @@ const saveNote = useCallback(async (pageNum, text) => {
     setMenuConfig(prev => ({ ...prev, show: false }));
     const capturedText = selectedText;
     setInjectedMessage({ type: 'summary', selectedText: capturedText, length, result: null, id: Date.now() });
+    // On mobile, switch to chat tab after summarizing
+    if (isMobile) setMobileTab('chat');
 
     const headers = guardedHeaders();
     if (!headers) return;
@@ -571,7 +802,7 @@ const saveNote = useCallback(async (pageNum, text) => {
     }
   };
 
-  // ── Text-to-speech ─────────────────────────────────────────────────────────
+  // ── Text-to-speech ────────────────────────────────────────────────────────
   const handlePronounce = async (e) => {
     e.stopPropagation();
     setPhonetic('');
@@ -605,7 +836,7 @@ const saveNote = useCallback(async (pageNum, text) => {
     window.speechSynthesis.speak(utterance);
   };
 
-  // ── Delete document ────────────────────────────────────────────────────────
+  // ── Delete document ───────────────────────────────────────────────────────
   const handleDelete = async () => {
     if (!window.confirm('Delete this document? This cannot be undone.')) return;
     const headers = guardedHeaders();
@@ -613,24 +844,94 @@ const saveNote = useCallback(async (pageNum, text) => {
     try {
       const res = await fetch(`${BASE}/document/${documentId}`, { method: 'DELETE', headers });
       if (res.status === 401) { onAuthError(); return; }
-      handleBack(); // ← use handleBack so session time is recorded even on delete
+      handleBack();
     } catch (err) { console.error('Delete failed:', err); }
   };
 
-  // ── Page note helpers — unified for ALL document types ─────────────────────
+  // ── Page note helpers ─────────────────────────────────────────────────────
   const toggleNoteSection = (pageNum) => setOpenNotePageNum(prev => (prev === pageNum ? null : pageNum));
   const handleNoteChange  = (pageNum, value) => setPageNotes(prev => ({ ...prev, [pageNum]: value }));
 
   const dirtyCount = dirtyPages.size;
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Sidebar icons (reused on desktop sidebar & mobile top bar) ────────────
+  const SidebarActions = ({ className = '' }) => (
+    <>
+      {!isTextDoc && (
+        <>
+          {/* Bulk save */}
+          <div className={`relative ${className}`}>
+            <button
+              onClick={handleBulkSave}
+              className={`p-3 rounded-xl transition-all ${dirtyCount > 0 ? 'text-blue-500 hover:bg-blue-50 cursor-pointer' : 'text-gray-300 cursor-default opacity-50'}`}
+              title={dirtyCount > 0 ? `Save all ${dirtyCount} unsaved page(s)` : 'No unsaved changes'}
+            >
+              {isBulkSaving ? <Spinner size="w-5 h-5" color="border-t-blue-500" /> : (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                </svg>
+              )}
+              {dirtyCount > 0 && !isBulkSaving && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                  {dirtyCount}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Generate PDF */}
+          <button
+            onClick={handleGeneratePdf}
+            disabled={isGeneratingPdf}
+            className={`p-3 text-gray-400 hover:bg-blue-50 hover:text-blue-500 rounded-xl transition-all disabled:opacity-50 ${className}`}
+            title="Rebuild PDF from edited text"
+          >
+            {isGeneratingPdf ? <Spinner size="w-5 h-5" color="border-t-blue-500" /> : (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+            )}
+          </button>
+
+          {/* View generated PDF */}
+          {generatedPdfUrl && (
+            <a
+              href={generatedPdfUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`p-3 text-gray-400 hover:bg-emerald-50 hover:text-emerald-600 rounded-xl transition-all relative group ${className}`}
+              title="View generated PDF"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+              </svg>
+              <span className="absolute top-2 right-2 w-2 h-2 bg-emerald-400 rounded-full ring-2 ring-white" />
+            </a>
+          )}
+        </>
+      )}
+
+      {/* Delete */}
+      <button
+        onClick={handleDelete}
+        className={`p-3 text-gray-400 hover:bg-red-50 hover:text-red-500 rounded-xl transition-all ${className}`}
+        title="Delete document"
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+        </svg>
+      </button>
+    </>
+  );
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div
-      className="flex h-screen bg-[#F0F2F5] relative overflow-hidden font-sans"
+      className="flex flex-col md:flex-row h-screen bg-[#F0F2F5] relative overflow-hidden font-sans"
       onMouseUp={handleMouseUp}
       onMouseDown={handleMouseDown}
     >
-
       {/* ── FLOATING SELECTION MENU ── */}
       {menuConfig.show && (
         <>
@@ -736,7 +1037,7 @@ const saveNote = useCallback(async (pageNum, text) => {
         <div
           className="meaning-popup fixed z-[9998] w-[280px] bg-gray-50 rounded-2xl border border-gray-200 shadow-lg overflow-hidden"
           style={{
-            left:      `${meaningPopup.x}px`,
+            left:      `${Math.min(meaningPopup.x, window.innerWidth - 150)}px`,
             top:       `${meaningPopup.y}px`,
             transform: 'translateX(-50%) translateY(-100%) translateY(-12px)',
           }}
@@ -766,8 +1067,8 @@ const saveNote = useCallback(async (pageNum, text) => {
             ) : (
               <div>
                 <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.07em] mb-0.5">Definition</p>
-                <p className="text-[13px] leading-[1.65] text-gray-900 mb-2.5">{meaningPopup.result.split('\n\n')[0]}</p>
-                {meaningPopup.result.split('\n\n').slice(1).map((line, i) => {
+                <p className="text-[13px] leading-[1.65] text-gray-900 mb-2.5">{meaningPopup.result.split('\n')[0]}</p>
+                {meaningPopup.result.split('\n').slice(1).map((line, i) => {
                   const colonIdx = line.indexOf(': ');
                   const label    = colonIdx !== -1 ? line.slice(0, colonIdx) : line;
                   const value    = colonIdx !== -1 ? line.slice(colonIdx + 2) : '';
@@ -789,9 +1090,55 @@ const saveNote = useCallback(async (pageNum, text) => {
         </div>
       )}
 
-      {/* ── SIDEBAR ── */}
-      <aside className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-6 shrink-0 z-20">
-        {/* ── ONLY CHANGE: onBack() → handleBack() ── */}
+      {/* ── MOBILE TOP BAR ── */}
+      <header className="md:hidden flex items-center gap-2 px-3 py-2 bg-white border-b border-gray-200 shrink-0 z-20">
+        <button onClick={handleBack} className="p-2 text-gray-500 hover:bg-gray-100 rounded-xl transition-all" title="Back">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          </svg>
+        </button>
+
+        {/* Page indicator */}
+        {!isTextDoc && totalPages > 0 && (
+          <span className="text-xs text-gray-500 font-medium">
+            {currentPage > 0 ? `${currentPage}/${totalPages}` : `0/${totalPages}`}
+          </span>
+        )}
+
+        {/* Doc name */}
+        <div className="flex-1 min-w-0 mx-1">
+          {(docMeta?.filename || documentName) && (
+            <p className="text-xs font-medium text-gray-700 truncate">
+              {docMeta?.filename || documentName}
+            </p>
+          )}
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex items-center">
+          <SidebarActions />
+        </div>
+
+        {/* Tab switcher */}
+        <div className="flex bg-gray-100 rounded-xl p-0.5">
+          <button
+            onClick={() => setMobileTab('doc')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${mobileTab === 'doc' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'}`}
+          >
+            Doc
+          </button>
+          <button
+            onClick={() => setMobileTab('chat')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${mobileTab === 'chat' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'}`}
+          >
+            Chat
+          </button>
+        </div>
+      </header>
+
+      {/* ── DESKTOP SIDEBAR ── */}
+      <aside className="hidden md:flex w-16 bg-white border-r border-gray-200 flex-col items-center py-6 shrink-0 z-20">
+        {/* Back */}
         <button onClick={handleBack} className="p-3 mb-4 text-gray-500 hover:bg-gray-100 hover:text-gray-900 rounded-xl transition-all" title="Back to Dashboard">
           <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -802,11 +1149,11 @@ const saveNote = useCallback(async (pageNum, text) => {
 
         {!isTextDoc && (
           <>
+            {/* Bulk save */}
             <div className="relative">
               <button
                 onClick={handleBulkSave}
-                disabled={isBulkSaving || dirtyCount === 0}
-                className={`p-3 rounded-xl transition-all ${dirtyCount > 0 ? 'text-blue-500 hover:bg-blue-50' : 'text-gray-300 cursor-default'} disabled:opacity-50`}
+                className={`p-3 rounded-xl transition-all ${dirtyCount > 0 ? 'text-blue-500 hover:bg-blue-50 cursor-pointer' : 'text-gray-300 cursor-default opacity-50'}`}
                 title={dirtyCount > 0 ? `Save all ${dirtyCount} unsaved page(s)` : 'No unsaved changes'}
               >
                 {isBulkSaving ? <Spinner size="w-5 h-5" color="border-t-blue-500" /> : (
@@ -822,6 +1169,7 @@ const saveNote = useCallback(async (pageNum, text) => {
               )}
             </div>
 
+            {/* Generate PDF */}
             <button
               onClick={handleGeneratePdf}
               disabled={isGeneratingPdf}
@@ -834,9 +1182,32 @@ const saveNote = useCallback(async (pageNum, text) => {
                 </svg>
               )}
             </button>
+
+            {generatedPdfUrl && (
+              <>
+                <div className="w-8 h-px bg-gray-100 my-1" />
+                <a
+                  href={generatedPdfUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-3 text-gray-400 hover:bg-emerald-50 hover:text-emerald-600 rounded-xl transition-all relative group"
+                  title="View generated PDF"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                      d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                  </svg>
+                  <span className="absolute top-2 right-2 w-2 h-2 bg-emerald-400 rounded-full ring-2 ring-white" />
+                  <span className="absolute left-full ml-2 top-1/2 -translate-y-1/2 bg-gray-900 text-white text-xs font-medium px-2.5 py-1.5 rounded-lg whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+                    View generated PDF
+                  </span>
+                </a>
+              </>
+            )}
           </>
         )}
 
+        {/* Delete */}
         <button
           onClick={handleDelete}
           className="p-3 mt-auto text-gray-400 hover:bg-red-50 hover:text-red-500 rounded-xl transition-all"
@@ -849,13 +1220,17 @@ const saveNote = useCallback(async (pageNum, text) => {
       </aside>
 
       {/* ── MAIN CONTENT AREA ── */}
-      <main className="flex-1 flex flex-row h-screen relative overflow-hidden min-w-0">
+      <main className="flex-1 flex flex-col md:flex-row h-full md:h-screen relative min-w-0 overflow-hidden">
 
-        {/* ── DOCUMENT COLUMN ── */}
-        <div className="flex-1 flex flex-col h-screen relative overflow-hidden min-w-0">
+        {/* ── DOCUMENT COLUMN — hidden on mobile when chat tab active ── */}
+        <div className={`
+          flex-1 flex flex-col relative overflow-hidden min-w-0
+          ${isMobile && mobileTab === 'chat' ? 'hidden' : 'flex'}
+          h-full md:h-screen
+        `}>
 
-          {/* Top bar */}
-          <header className="absolute top-0 left-0 right-0 z-10 px-6 py-4 pointer-events-none flex justify-between items-center">
+          {/* Desktop top bar */}
+          <header className="hidden md:flex absolute top-8 left-0 right-0 z-10 px-0 py-4 pointer-events-none justify-between items-center">
             <div className="flex items-center gap-2 pointer-events-auto">
               {(docMeta?.filename || documentName || documentCategory) && (
                 <div className="bg-white/90 backdrop-blur-sm border border-gray-200 shadow-sm px-3 py-1.5 rounded-full">
@@ -883,54 +1258,129 @@ const saveNote = useCallback(async (pageNum, text) => {
             </div>
           </header>
 
+          {/* Mobile streaming/loading indicator */}
+          {isMobile && (streamingPage || isLoadingMore) && (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 border-b border-blue-100">
+              <Spinner size="w-3 h-3" color="border-t-blue-500" />
+              <span className="text-xs text-blue-600 font-medium">
+                {streamingPage ? `Loading page ${streamingPage}…` : 'Loading…'}
+              </span>
+            </div>
+          )}
+
           {/* Toasts */}
           <div className="relative z-[400]">
+            {!isTextDoc && fmtSummary && !fmtSummary.all_done && (
+              <div className="mx-3 md:mx-4 mt-2 md:mt-16 mb-0 z-10">
+                <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-center gap-3">
+                  <div className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-semibold text-amber-800">Formatting OCR text with AI…</span>
+                      <span className="text-xs text-amber-600 font-medium tabular-nums">
+                        {fmtSummary.completed}/{fmtSummary.total_pages} pages
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-amber-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-amber-500 rounded-full transition-all duration-500"
+                        style={{ width: `${fmtSummary.total_pages > 0 ? (fmtSummary.completed / fmtSummary.total_pages) * 100 : 0}%` }}
+                      />
+                    </div>
+                    <div className="flex gap-2 mt-1.5">
+                      {fmtSummary.processing > 0 && (
+                        <span className="text-[10px] text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">
+                          {fmtSummary.processing} processing
+                        </span>
+                      )}
+                      {fmtSummary.pending > 0 && (
+                        <span className="text-[10px] text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+                          {fmtSummary.pending} pending
+                        </span>
+                      )}
+                      {fmtSummary.failed > 0 && (
+                        <button
+                          onClick={handleReformat}
+                          className="text-[10px] text-red-600 bg-red-50 hover:bg-red-100 px-2 py-0.5 rounded-full transition-colors border border-red-200"
+                        >
+                          {fmtSummary.failed} failed — retry ↺
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!isTextDoc && showFmtDone && (
+              <div className="mx-3 md:mx-4 mt-2 md:mt-16 mb-0 z-10">
+                <div className="bg-green-50 border border-green-200 rounded-xl px-4 py-2.5 flex items-center gap-2">
+                  <svg className="w-4 h-4 text-green-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span className="text-xs font-medium text-green-800">
+                    OCR formatting complete — text quality improved
+                  </span>
+                  {fmtSummary.failed > 0 && (
+                    <button onClick={handleReformat} className="ml-auto text-[10px] text-red-500 hover:underline">
+                      Retry {fmtSummary.failed} failed
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             <Toast status={bulkSaveStatus} message={bulkSaveStatus === 'success' ? 'All changes saved' : 'Save failed — try again'} />
             <Toast status={pdfGenStatus} message={pdfGenMessage} />
           </div>
 
           {/* Scrollable content */}
-          <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden pt-16 pb-20 scroll-smooth">
+          <div
+            ref={scrollRef}
+            className="flex-1 overflow-y-auto pb-20 scroll-smooth"
+            style={{ maxHeight: '100%' }}
+          >
             {isTextDoc ? (
               pdfUrl ? (
-                <>
-                  <PdfViewer
-                    pdfUrl={pdfUrl}
-                    pageNotes={pageNotes}
-                    onNoteChange={handleNoteChange}
-                    openNotePageNum={openNotePageNum}
-                    onToggleNote={toggleNoteSection}
-                    onPageChange={(pageNum) => setCurrentPage(pageNum)}
-                    onNoteSave={saveNote}
-                  />
-                </>
+                <PdfViewer
+                  pdfUrl={pdfUrl}
+                  pageNotes={pageNotes}
+                  onNoteChange={handleNoteChange}
+                  openNotePageNum={openNotePageNum}
+                  onToggleNote={toggleNoteSection}
+                  onPageChange={(pageNum) => setCurrentPage(pageNum)}
+                  onNoteSave={saveNote}
+                />
               ) : (
                 <div className="flex items-center justify-center h-full">
                   <Spinner size="w-8 h-8" color="border-t-gray-600" />
                 </div>
               )
             ) : (
-              <div className="flex flex-col items-start pl-6 space-y-8">
+            // AFTER
+<div className="flex flex-col items-center px-0 sm:px-6 space-y-6 sm:space-y-8 pt-4 md:pt-20">
                 {pages.map((page) => (
-                  <div key={page.page_number} className="relative group transition-transform duration-300">
-                    <div className="absolute -left-5 top-0 text-xs text-gray-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div key={page.page_number} className="relative group transition-transform duration-300 w-full flex flex-col items-center">
+                    <div className="absolute -left-3 sm:-left-5 top-0 text-xs text-gray-400 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
                       p.{page.page_number}
                     </div>
 
                     {dirtyPages.has(page.page_number) && (
-                      <div className="absolute -right-3 top-3 w-2 h-2 bg-blue-400 rounded-full" title="Unsaved changes" />
+                      <div className="absolute -right-1 sm:-right-3 top-3 w-2 h-2 bg-blue-400 rounded-full" title="Unsaved changes" />
                     )}
 
-                    {/* ── PAGE CARD ── */}
+                    {/* PAGE CARD — responsive width */}
                     <div
-                      className="bg-white w-[210mm] shadow-sm hover:shadow-md transition-shadow duration-300 border border-gray-200/60 relative"
+                      ref={(el) => { if (el) pageRefs.current[page.page_number] = el; }}
+                      className="bg-white w-full  shadow-sm hover:shadow-md transition-shadow duration-300 border border-gray-200/60 relative"
                       style={{ userSelect: 'text', WebkitUserSelect: 'text', overflow: 'visible' }}
                     >
                       <div
                         contentEditable
                         suppressContentEditableWarning
-                        className="w-full h-full p-[25mm] pb-[15mm] outline-none text-[12pt] leading-[1.8] text-gray-800 font-serif text-justify selection:bg-blue-100 selection:text-blue-900 whitespace-pre-wrap empty:before:content-['Start_typing...'] empty:before:text-gray-300"
-                        style={{ minHeight: '257mm' }}
+                        className="w-full h-full p-4 sm:p-[25mm] sm:pb-[15mm] outline-none text-[11pt] sm:text-[12pt] leading-[1.8] text-gray-800 font-serif text-justify selection:bg-blue-100 selection:text-blue-900 whitespace-pre-wrap empty:before:content-['Start_typing...'] empty:before:text-gray-300"
+                       style={{ minHeight: 'auto' }}
+                        onInput={(e) => setDirtyPages(prev => new Set(prev).add(page.page_number))}
                         onBlur={(e) => handleContentChange(page.page_number, e.currentTarget.innerText)}
                       >
                         {page.extracted_text || ''}
@@ -943,7 +1393,6 @@ const saveNote = useCallback(async (pageNum, text) => {
                         </div>
                       )}
 
-                      {/* ── CENTERED PAGE FOOTER with Note button ── */}
                       <div className="border-t border-gray-100 flex items-center justify-center px-4 py-2.5 bg-white">
                         <CenteredNoteButton
                           hasNote={!!pageNotes[page.page_number]}
@@ -954,7 +1403,6 @@ const saveNote = useCallback(async (pageNum, text) => {
                       </div>
                     </div>
 
-                    {/* ── FLOATING NOTE PANEL (appears below page) ── */}
                     <FloatingNotePanel
                       pageNum={page.page_number}
                       note={pageNotes[page.page_number] || ''}
@@ -967,7 +1415,7 @@ const saveNote = useCallback(async (pageNum, text) => {
                 ))}
 
                 {pageLoadError && !isLoadingMore && (
-                  <div className="flex flex-col items-center gap-3 py-8 text-center w-[210mm]">
+                  <div className="flex flex-col items-center gap-3 py-8 text-center w-full max-w-[210mm]">
                     <p className="text-sm text-gray-500">Failed to load page. The document may still be processing.</p>
                     <button
                       onClick={() => { setPageLoadError(false); loadNextPage(); }}
@@ -979,7 +1427,7 @@ const saveNote = useCallback(async (pageNum, text) => {
                 )}
 
                 {isLoadingMore && (
-                  <div className="bg-white w-[210mm] h-[297mm] shadow-sm border border-gray-200 p-[25mm] space-y-6 animate-pulse">
+                  <div className="bg-white w-full max-w-[210mm] shadow-sm border border-gray-200 p-6 sm:p-[25mm] space-y-6 animate-pulse" style={{ minHeight: '40vw' }}>
                     <div className="h-4 bg-gray-100 rounded w-full" />
                     <div className="h-4 bg-gray-100 rounded w-full" />
                     <div className="h-4 bg-gray-100 rounded w-5/6" />
@@ -988,56 +1436,38 @@ const saveNote = useCallback(async (pageNum, text) => {
                   </div>
                 )}
 
-                {!hasMore && pages.length > 0 && <EndOfDocument />}
+                {!hasMore && pages.length > 0 && (
+                  <div className="w-full max-w-[250mm] flex justify-center py-1">
+                    <EndOfDocument />
+                  </div>
+                )}
                 <div ref={bottomRef} className="h-4" />
               </div>
             )}
           </div>
         </div>
 
- <div
-  style={{ width: chatWidth, minWidth: 260, maxWidth: 600 }}
-  className="chat-panel shrink-0 relative flex self-stretch"
->
-  {/* Drag handle */}
-  <div
-    className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-30 group"
-    style={{ marginLeft: -2 }}
-    onMouseDown={(e) => {
-      e.preventDefault();
-      isResizing.current = true;
-      const startX = e.clientX;
-      const startW = chatWidth;
-
-      const onMove = (ev) => {
-        if (!isResizing.current) return;
-        const delta = startX - ev.clientX; // dragging left = wider
-        setChatWidth(Math.min(600, Math.max(260, startW + delta)));
-      };
-      const onUp = () => {
-        isResizing.current = false;
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-    }}
-  >
-    <div className="absolute left-0 top-0 bottom-0 w-[3px] bg-transparent group-hover:bg-blue-300 transition-colors" />
-  </div>
-
-  <ChatPanel
-    documentId={documentId}
-    documentName={docMeta?.filename || documentName || ''}
-    injectedMessage={injectedMessage}
-    onInjectedMessageConsumed={() => setInjectedMessage(null)}
-    panelWidth={chatWidth}
-  />
-</div>
-</main>      
-</div>
+        {/* ── CHAT PANEL — full screen on mobile when active, fixed width on desktop ── */}
+        <div className={`
+          ${isMobile
+            ? `${mobileTab === 'chat' ? 'flex' : 'hidden'} w-full`
+            : 'flex shrink-0 border-l border-gray-200'
+          }
+          chat-panel relative self-stretch
+        `}
+          style={isMobile ? {} : { width: 520, minWidth: 520, maxWidth: 520 }}
+        >
+          <ChatPanel
+            documentId={documentId}
+            documentName={docMeta?.filename || documentName || ''}
+            injectedMessage={injectedMessage}
+            onInjectedMessageConsumed={() => setInjectedMessage(null)}
+            panelWidth={isMobile ? window.innerWidth : 520}
+          />
+        </div>
+      </main>
+    </div>
   );
 };
-
 
 export default Workspace;

@@ -103,7 +103,7 @@ const Feature = () => {
   return (
     <section 
       id="features"
-      className="w-full py-24 relative overflow-hidden bg-[#20201f]"
+      className="w-full py-24 relative overflow-hidden bg-[#181814]"
     >
       {/* Subtle warm ambient glow */}
       <div 

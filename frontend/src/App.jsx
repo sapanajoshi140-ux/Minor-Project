@@ -7,7 +7,7 @@ import { useEffect } from 'react';
 import Navbar from "./Navbar";
 import HeroSlider from "./HeroSlider";
 import Features from "./Features";
-import Footer from "./Footer";
+import Footer from "./footer";
 import Dashboard from "./Dashboard";
 import VerifyEmail from "./VerifyEmail";
 import ResetPassword from "./Passwordreset";

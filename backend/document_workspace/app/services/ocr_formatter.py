@@ -46,7 +46,6 @@ from config import (
     LLM_MODEL,
     LLM_TIMEOUT,
     OCR_FORMAT_CHUNK_CHARS,
-    OCR_FORMAT_MAX_RETRIES,
     FORMAT_CONCURRENCY,
     FORMAT_QUEUE_SIZE,
     FORMAT_MAX_RETRIES,
@@ -55,9 +54,15 @@ from config import (
 logger = logging.getLogger(__name__)
 
 # ── Shared in-process queue ───────────────────────────────────────────────────
-# Populated by enqueue_page() from upload.py.
-# Drained by run_formatting_worker() started in main.py lifespan.
-FORMAT_QUEUE: asyncio.Queue[int] = asyncio.Queue(maxsize=FORMAT_QUEUE_SIZE)
+# Lazily initialised inside run_formatting_worker() which runs after the
+# asyncio event loop is started.  asyncio.Queue must NOT be created at module
+# import time — in Python 3.10+ this raises a DeprecationWarning and in
+# future versions will be an error.
+#
+# enqueue_page() guards against the queue not yet existing so it is safe to
+# call before the worker starts (pages are silently dropped, which is
+# acceptable — the /reformat endpoint can re-enqueue them).
+FORMAT_QUEUE: Optional[asyncio.Queue] = None
 
 
 # ── Per-document SSE stream registry ─────────────────────────────────────────
@@ -174,7 +179,15 @@ def enqueue_page(page_id: int) -> None:
     the workspace will display raw OCR text for that page.
 
     Safe to call from sync or async contexts.
+    If the worker has not started yet (FORMAT_QUEUE is None) the call is a
+    no-op; use POST /reformat to re-enqueue after the worker is running.
     """
+    if FORMAT_QUEUE is None:
+        logger.warning(
+            f"Formatter queue not initialised; page {page_id} will not be "
+            f"formatted automatically. Use POST /reformat after server startup."
+        )
+        return
     try:
         FORMAT_QUEUE.put_nowait(page_id)
         logger.debug(f"Formatter: enqueued page_id={page_id} (queue depth={FORMAT_QUEUE.qsize()})")
@@ -224,11 +237,16 @@ def _call_ollama(raw_text: str) -> str:
     """
     Send raw_text to Ollama and return the formatted string.
 
-    Splits into chunks so very long pages are handled without exceeding
-    Ollama's context window.  Chunks are rejoined with a blank line.
+    Splits into chunks so very long pages stay within Ollama's context window.
+    Chunks are rejoined with a blank line.
 
     Raises requests.RequestException on connection/timeout errors.
     Raises ValueError if Ollama returns an unexpected response shape.
+
+    NOTE: No retry sleep here — this function is called from a thread-pool
+    executor by _format_one_page.  Sleeping inside an executor thread wastes
+    a thread-pool slot and can starve other work.  All retry back-off is
+    handled by the async _format_one_page caller via asyncio.sleep().
     """
     if not raw_text or not raw_text.strip():
         return raw_text
@@ -249,50 +267,31 @@ def _call_ollama(raw_text: str) -> str:
             ],
             "stream": False,
             "options": {
-                "temperature": 0.0,   # deterministic — no creative variation
-                "num_predict": int(len(chunk) * 1.5),  # generous token budget
+                "temperature": 0.0,
+                "num_predict": int(len(chunk) * 1.5),
             },
         }
 
-        for attempt in range(1, OCR_FORMAT_MAX_RETRIES + 2):
-            try:
-                resp = requests.post(
-                    f"{OLLAMA_BASE_URL}/api/chat",
-                    json=payload,
-                    timeout=LLM_TIMEOUT,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                formatted_chunk = (
-                    data.get("message", {}).get("content", "")
-                    or data.get("response", "")
-                ).strip()
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json=payload,
+            timeout=LLM_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        formatted_chunk = (
+            data.get("message", {}).get("content", "")
+            or data.get("response", "")
+        ).strip()
 
-                if not formatted_chunk:
-                    raise ValueError("Ollama returned empty content.")
+        if not formatted_chunk:
+            raise ValueError(f"Ollama returned empty content for chunk {idx + 1}.")
 
-                formatted_chunks.append(formatted_chunk)
-                logger.debug(
-                    f"Formatter chunk {idx+1}/{len(chunks)}: "
-                    f"{len(chunk)} → {len(formatted_chunk)} chars."
-                )
-                break  # success
-
-            except (requests.RequestException, ValueError) as exc:
-                if attempt <= OCR_FORMAT_MAX_RETRIES:
-                    wait = attempt * 2
-                    logger.warning(
-                        f"Formatter chunk {idx+1} attempt {attempt} failed: {exc}. "
-                        f"Retrying in {wait}s…"
-                    )
-                    time.sleep(wait)
-                else:
-                    # All retries exhausted for this chunk — use raw text.
-                    logger.error(
-                        f"Formatter chunk {idx+1} exhausted retries: {exc}. "
-                        f"Using raw text for this chunk."
-                    )
-                    formatted_chunks.append(chunk)
+        formatted_chunks.append(formatted_chunk)
+        logger.debug(
+            f"Formatter chunk {idx+1}/{len(chunks)}: "
+            f"{len(chunk)} → {len(formatted_chunk)} chars."
+        )
 
     return "\n\n".join(formatted_chunks)
 
@@ -506,9 +505,17 @@ async def run_formatting_worker() -> None:
 
         asyncio.create_task(run_formatting_worker())
     """
-    global _loop
-    loop = asyncio.get_event_loop()
+    global _loop, FORMAT_QUEUE
+
+    # Initialise the queue here — inside a running event loop — to avoid the
+    # Python 3.10+ deprecation/error for asyncio.Queue() at module import time.
+    FORMAT_QUEUE = asyncio.Queue(maxsize=FORMAT_QUEUE_SIZE)
+
+    # asyncio.get_running_loop() is the correct call inside a coroutine;
+    # get_event_loop() is deprecated in Python 3.10+ when there is a running loop.
+    loop = asyncio.get_running_loop()
     _loop = loop   # store for use by thread-pool DB helpers
+
     logger.info(
         f"OCR formatting worker started "
         f"(concurrency={FORMAT_CONCURRENCY}, "
@@ -533,8 +540,6 @@ async def run_formatting_worker() -> None:
                     *[_format_one_page(pid, loop) for pid in batch],
                     return_exceptions=True,  # one failure must not kill others
                 )
-                for _ in batch:
-                    FORMAT_QUEUE.task_done()
             else:
                 # Queue was empty — sleep briefly before polling again.
                 await asyncio.sleep(1)

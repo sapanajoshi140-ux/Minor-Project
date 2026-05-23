@@ -37,7 +37,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-from config import DATABASE_URL, USER_STORAGE_LIMIT_BYTES
+from config import DATABASE_URL
 
 engine       = create_engine(DATABASE_URL, pool_pre_ping=True, echo=False)
 SessionLocal = sessionmaker(bind=engine)

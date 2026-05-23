@@ -35,7 +35,7 @@ from typing import List
 import pytesseract
 from PIL import Image
 
-from config import TESSERACT_CMD, OCR_CONFIDENCE_THRESHOLD, OCR_HANDWRITTEN_FALLBACK_THRESHOLD
+from config import TESSERACT_CMD, OCR_HANDWRITTEN_FALLBACK_THRESHOLD
 
 logger = logging.getLogger(__name__)
 

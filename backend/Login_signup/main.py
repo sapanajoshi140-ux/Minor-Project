@@ -170,7 +170,6 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 # ---------- PASSWORD STRENGTH ----------
-# Fix #9 — import re at module level, not inside the function on every call
 def _check_password_strength(password: str) -> None:
     """
     Enforce a baseline password policy.  Raises HTTPException 400 on failure.

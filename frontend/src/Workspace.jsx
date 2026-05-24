@@ -238,15 +238,19 @@ const Workspace = ({
               page_number:       pn,
               extracted_text:    '',
               formatting_status: line.formatting_status,
+              // FIX 3: mark pages loaded via fetchDocumentView as NOT streaming
+              _streaming: false,
             };
           }
           pageMap[pn].extracted_text += line.text + '\n';
         }
         const pageList = Object.values(pageMap).sort((a, b) => a.page_number - b.page_number);
         setPages(pageList);
-        const lastPage = pageList[pageList.length - 1].page_number;
-        currentPageRef.current = lastPage;
-        setCurrentPage(lastPage);
+        // FIX: only update currentPage to the first page, not the last
+        // The IntersectionObserver will update currentPage as the user scrolls
+        const firstPage = pageList[0].page_number;
+        currentPageRef.current = firstPage;
+        setCurrentPage(firstPage);
         return true;
       }
       return false;
@@ -412,22 +416,29 @@ const Workspace = ({
     }
   };
 
+  // ── FIX 1 + FIX 2 + FIX 3: fetchPageStreaming with all dedup guards ───────
   const fetchPageStreaming = useCallback(async (pageNum) => {
+    // FIX 1: Check pagesRef synchronously before doing anything
     const alreadyLoaded = pagesRef.current.find(
       p => p.page_number === pageNum && p.extracted_text?.trim()
     );
     if (alreadyLoaded) return true;
+
     const headers = guardedHeaders();
     if (!headers) return null;
     streamAbortRef.current?.abort();
     const controller = new AbortController();
     streamAbortRef.current = controller;
     setStreamingPage(pageNum);
-    setPages(prev =>
-      prev.find(p => p.page_number === pageNum)
-        ? prev
-        : [...prev, { page_number: pageNum, extracted_text: '', _streaming: true }]
-    );
+
+    // FIX 2: Only add the stub if the page isn't already present with content
+    setPages(prev => {
+      const existing = prev.find(p => p.page_number === pageNum);
+      if (existing?.extracted_text?.trim()) return prev; // already has content, don't touch it
+      if (existing) return prev;                          // stub already added
+      return [...prev, { page_number: pageNum, extracted_text: '', _streaming: true }];
+    });
+
     try {
       const res = await fetch(`${BASE}/document/${documentId}/page/${pageNum}/lines`, {
         headers,
@@ -454,15 +465,18 @@ const Workspace = ({
           try {
             const lineObj = JSON.parse(trimmed);
             if (lineObj.text) {
+              // FIX 3: Only append to pages that are still in _streaming mode.
+              // If fetchDocumentView already populated the page (_streaming is
+              // false/undefined), this is a no-op and avoids doubled text.
               setPages(prev =>
                 prev.map(p =>
-                  p.page_number === pageNum
+                  p.page_number === pageNum && p._streaming
                     ? { ...p, extracted_text: (p.extracted_text || '') + lineObj.text + '\n' }
                     : p
                 )
               );
             }
-          } catch { /* skip */ }
+          } catch { /* skip malformed JSON lines */ }
         }
       }
       setPages(prev => prev.map(p => p.page_number === pageNum ? { ...p, _streaming: false } : p));
@@ -493,6 +507,7 @@ const Workspace = ({
     return null;
   }, [documentId, BASE, guardedHeaders, onAuthError]);
 
+  // ── FIX 4: prefetchPageBatch — never update currentPage ──────────────────
   const prefetchPageBatch = useCallback(async (afterPage, limit = 5) => {
     const headers = guardedHeaders();
     if (!headers) return;
@@ -511,11 +526,10 @@ const Workspace = ({
           const fresh    = data.pages.filter(p => !existing.has(p.page_number));
           return fresh.length ? [...prev, ...fresh] : prev;
         });
-        const last = data.pages[data.pages.length - 1].page_number;
-        if (last > currentPageRef.current) {
-          currentPageRef.current = last;
-          setCurrentPage(last);
-        }
+        // FIX 4: Removed the currentPage/currentPageRef update that was here.
+        // currentPage is managed solely by the IntersectionObserver as the user
+        // scrolls, so prefetching silently in the background won't jump the
+        // page counter to 5 on initial load.
       }
     } catch (err) {
       console.error('Batch prefetch failed:', err);
@@ -566,13 +580,19 @@ const Workspace = ({
     setIsLoadingMore(false);
   }, [isLoadingMore, totalPages, fetchPageStreaming, fetchPage, prefetchPageBatch]);
 
+  // ── FIX 5: Initial load — don't call loadNextPage if fetchDocumentView
+  //    already populated pages. This prevents the double-load on reopen. ─────
   useEffect(() => {
     if (isTextDoc) return;
     fetchDocumentView().then((hasData) => {
       if (!hasData) {
+        // No cached view data — load fresh from scratch
         fetchDocumentMeta();
         loadNextPage();
       }
+      // If hasData is true, fetchDocumentView already populated pages from
+      // ocr_lines. Do NOT call loadNextPage — that would re-fetch page 1
+      // and append its text a second time.
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -749,7 +769,7 @@ const Workspace = ({
   const handleNoteChange  = (pageNum, value) => setPageNotes(prev => ({ ...prev, [pageNum]: value }));
   const dirtyCount = dirtyPages.size;
 
-  // ── Theme switcher — defined outside JSX to avoid re-definition issues ────
+  // ── Theme switcher ────────────────────────────────────────────────────────
   const THEMES = [
     { id: 'light',   icon: '☀️', title: 'Light mode'   },
     { id: 'dark',    icon: '🌙', title: 'Dark mode'    },

@@ -1,4 +1,4 @@
-# 📚 Document Intelligence Platform
+# 📚 READWITHEASE- A Document Intelligence Platform
 
 **A modern, AI-powered document management and analysis system with intelligent RAG-based Q&A, OCR support, and real-time collaboration features.**
 

@@ -1343,7 +1343,12 @@ const Workspace = ({
                         contentEditable
                         suppressContentEditableWarning
                         className="w-full h-full p-4 sm:p-[25mm] sm:pb-[15mm] outline-none text-[11pt] sm:text-[12pt] leading-[1.8] font-serif text-justify whitespace-pre-wrap empty:before:content-['Start_typing...'] empty:before:text-gray-300"
-                        style={{ minHeight: 'auto', color: 'var(--page-text)', caretColor: 'var(--muted-text)' }}
+                     style={{ 
+  height: '29.7cm',
+  overflow: 'hidden',
+  color: 'var(--page-text)', 
+  caretColor: 'var(--muted-text)' 
+}}
                         onInput={() => setDirtyPages(prev => new Set(prev).add(page.page_number))}
                         onBlur={(e) => handleContentChange(page.page_number, e.currentTarget.innerText)}
                       >

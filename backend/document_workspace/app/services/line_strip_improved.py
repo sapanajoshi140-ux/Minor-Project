@@ -99,11 +99,11 @@ class LineStripConfig:
         Radius for OpenCV inpainting over detected line pixels.  Default 4.
     """
     algorithm:         Literal["hybrid", "fast", "original"] = "hybrid"
-    min_strip_height:  int   = 20
+    min_strip_height:  int   = 12
     strip_padding:     int   = 6
     clahe_clip:        float = 2.5
     remove_red_lines:  bool  = True
-    remove_blue_lines: bool  = True
+    remove_blue_lines: bool  = False
     inpaint_radius:    int   = 4
 
 
@@ -150,7 +150,7 @@ def _remove_ruling_lines_color(img_bgr: np.ndarray, cfg: LineStripConfig) -> np.
 
     if cfg.remove_blue_lines:
         # Faint blue ruling: hue 85-140, LOW saturation, HIGH value (light colour)
-        mask_blue = cv2.inRange(hsv, np.array([85, 15, 170]), np.array([140, 110, 255]))
+        mask_blue = cv2.inRange(hsv, np.array([90, 10, 210]), np.array([125, 35, 255]))
         hk = cv2.getStructuringElement(cv2.MORPH_RECT, (w_img // 5, 1))
         mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_OPEN, hk)
         mask_blue = cv2.dilate(mask_blue, np.ones((3, 1), np.uint8), iterations=1)
@@ -410,7 +410,7 @@ def _detect_text_bands(gray: np.ndarray,
         raw_bands.append((start, h))
 
     # Merge adjacent bands separated by ≤ 8px (split ascenders/descenders)
-    MAX_GAP = 8
+    MAX_GAP = 4
     merged: list[tuple[int, int]] = []
     for band in raw_bands:
         if merged and (band[0] - merged[-1][1]) <= MAX_GAP:

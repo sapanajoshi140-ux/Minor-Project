@@ -1,19 +1,28 @@
 """
 handwritten_service.py — TrOCR loaded from LOCAL DISK (no HuggingFace at runtime).
 
-Refactor changes
-----------------
-- `run_trocr()` return value no longer includes `word_details` / `ocr_json`.
-  The OCRResult is now (text, confidence, ocr_type) only — word-level bbox
-  data is not stored anywhere in this pipeline.
-- `_get_trocr()` rewritten to fix:
-    * Device placement: model is fully moved to CPU/CUDA before caching so
-      that no tensor ever lives on the meta device at inference time.
-    * `low_cpu_mem_usage=False` retained (prevents meta-device buffers).
-    * Failure sentinel (_LOAD_FAILED) prevents repeated expensive retries.
-    * Explicit `torch.inference_mode()` instead of `torch.no_grad()` —
-      slightly lower overhead and disables autograd bookkeeping.
-- `process_handwritten_image()` no longer emits `ocr_json` key.
+Refactor changes (v2)
+---------------------
+Line stripping pipeline has been fully replaced with an improved hybrid
+algorithm. See ``line_strip_improved.py`` for full details.
+
+Key improvements:
+- Pre-processing: colour-based ruling-line removal (red margin + blue ruling)
+- Contrast enhancement via CLAHE for low-contrast / faint handwriting
+- Residual-line cleanup via morphological CC filtering
+- Improved projection profile: adaptive per-band Otsu + gap merging
+- Configurable via ``LineStripConfig`` (algorithm, padding, CLAHE clip, etc.)
+- Backward-compatible: existing callers need no changes
+- Original algorithm still available via LineStripConfig(algorithm="original")
+
+Previous refactor changes (v1)
+-------------------------------
+- ``run_trocr()`` return value no longer includes ``word_details`` / ``ocr_json``.
+  The OCRResult is now (text, confidence, ocr_type) only.
+- ``_get_trocr()`` rewritten to fix device placement and meta-device buffers.
+- Failure sentinel (_LOAD_FAILED) prevents repeated expensive retries.
+- Explicit ``torch.inference_mode()`` instead of ``torch.no_grad()``.
+- ``process_handwritten_image()`` no longer emits ``ocr_json`` key.
 
 Setup (one time only)
 ---------------------
@@ -31,11 +40,18 @@ Printed/scanned documents use Tesseract (ocr_service.py), not TrOCR.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Literal
+from typing import Literal
 
 from config import TROCR_HANDWRITTEN_PATH
+
+# Import improved line-strip pipeline
+from services.line_strip_improved import (
+    LineStripConfig,
+    split_into_line_strips,
+    preprocess_for_ocr,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +66,10 @@ _cache: dict = {}
 # Failure sentinel — a unique object so identity checks (is _LOAD_FAILED)
 # can never accidentally match a real cached value or a plain string.
 _LOAD_FAILED = object()
+
+# Default line-strip configuration — can be overridden per-call.
+# Set to "fast" if throughput is more important than edge-case robustness.
+DEFAULT_STRIP_CONFIG = LineStripConfig(algorithm="hybrid")
 
 
 # ── Shared result dataclass ───────────────────────────────────────────────────
@@ -110,17 +130,17 @@ def _get_trocr(mode: Literal["printed", "handwritten"]):
 
     Fix notes
     ---------
-    1. `low_cpu_mem_usage=False`  — disables the "meta device" lazy-init path
+    1. ``low_cpu_mem_usage=False``  — disables the "meta device" lazy-init path
        that newer transformers uses by default.  Without this, non-parameter
        buffers (e.g. decoder.embed_positions._float_tensor) stay on the meta
        device and cause a crash at inference time even after model.to(device).
 
-    2. Explicit `model.to(device).eval()` BEFORE caching — ensures every
+    2. Explicit ``model.to(device).eval()`` BEFORE caching — ensures every
        buffer/parameter is on the target device so inference never touches the
        meta device.
 
     3. Device is stored alongside (processor, model) so all call-sites use
-       the same device consistently — no second `torch.cuda.is_available()`
+       the same device consistently — no second ``torch.cuda.is_available()``
        call scattered across the codebase.
     """
     cached = _cache.get(mode)
@@ -191,50 +211,6 @@ def _get_trocr(mode: Literal["printed", "handwritten"]):
         ) from exc
 
 
-# ── Line slicer ───────────────────────────────────────────────────────────────
-
-def _split_into_line_strips(image, min_height: int = 20) -> list:
-    """
-    Slice a multi-line image into individual horizontal line strips using a
-    horizontal projection profile.
-
-    TrOCR is a line-level model; slicing a full-page image into line strips
-    first gives significantly better recognition accuracy.
-    """
-    import numpy as np
-    from PIL import Image
-
-    arr      = np.array(image.convert("L"))
-    h, w     = arr.shape
-    row_ink  = (arr < 200).sum(axis=1)
-    text_row = row_ink > (w * 0.01)
-
-    bands: list[tuple[int, int]] = []
-    in_band = False
-    start   = 0
-
-    for i, is_text in enumerate(text_row):
-        if is_text and not in_band:
-            start   = i
-            in_band = True
-        elif not is_text and in_band:
-            in_band = False
-            if (i - start) >= min_height:
-                bands.append((start, i))
-
-    if in_band and (h - start) >= min_height:
-        bands.append((start, h))
-
-    if not bands:
-        return [image]
-
-    pad = 4
-    return [
-        image.crop((0, max(0, t - pad), w, min(h, b + pad)))
-        for t, b in bands
-    ]
-
-
 # ── Single-strip inference ────────────────────────────────────────────────────
 
 def _run_strip(strip, processor, model, device) -> tuple[str, float]:
@@ -243,7 +219,7 @@ def _run_strip(strip, processor, model, device) -> tuple[str, float]:
 
     Returns (text, confidence_0_to_1).
 
-    Uses `torch.inference_mode()` (superset of no_grad — also disables
+    Uses ``torch.inference_mode()`` (superset of no_grad — also disables
     autograd version tracking, lower overhead for pure inference).
     """
     import torch
@@ -286,6 +262,7 @@ def _run_strip(strip, processor, model, device) -> tuple[str, float]:
 def run_trocr(
     image,
     mode: Literal["printed", "handwritten"] = "printed",
+    strip_config: LineStripConfig | None = None,
 ) -> TrOCRResult:
     """
     Run TrOCR on a PIL image.
@@ -294,6 +271,10 @@ def run_trocr(
     ----------
     image : PIL.Image — preprocessed input image.
     mode  : "printed" (default) or "handwritten".
+    strip_config : LineStripConfig, optional
+        Line-strip algorithm configuration.  Defaults to DEFAULT_STRIP_CONFIG
+        (HYBRID algorithm).  Pass ``LineStripConfig(algorithm="original")`` to
+        use the legacy projection-only path.
 
     Returns
     -------
@@ -301,10 +282,14 @@ def run_trocr(
     word_details / ocr_json are NOT produced — they are not stored in
     the refactored schema.
     """
+    if strip_config is None:
+        strip_config = DEFAULT_STRIP_CONFIG
+
     try:
         processor, model, device = _get_trocr(mode)
 
-        strips = _split_into_line_strips(image)
+        # ── Improved line slicing (replaces old _split_into_line_strips) ────
+        strips = split_into_line_strips(image, cfg=strip_config)
         logger.info(f"TrOCR [{mode}]: processing {len(strips)} line strip(s).")
 
         lines:       list[str]   = []
@@ -339,17 +324,30 @@ def run_trocr(
 
 # ── Convenience wrapper ───────────────────────────────────────────────────────
 
-def process_handwritten_image(file_path: str) -> list[dict]:
+def process_handwritten_image(
+    file_path: str,
+    strip_config: LineStripConfig | None = None,
+) -> list[dict]:
     """
     Process a single handwritten image file (uses the handwritten TrOCR model).
 
     Returns a list containing one page dict — no ocr_json key.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the image file.
+    strip_config : LineStripConfig, optional
+        Line-strip algorithm configuration.  Defaults to HYBRID algorithm.
+        Use ``LineStripConfig(algorithm="fast")`` for faster processing at
+        slightly lower robustness, or ``LineStripConfig(algorithm="original")``
+        to revert to the pre-v2 projection-only path.
     """
     from PIL import Image
 
     logger.info(f"Processing handwritten image: {file_path}")
     image  = Image.open(file_path).convert("RGB")
-    result = run_trocr(image, mode="handwritten")
+    result = run_trocr(image, mode="handwritten", strip_config=strip_config)
 
     return [{
         "page_number":      1,

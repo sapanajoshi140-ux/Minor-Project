@@ -865,12 +865,13 @@ def bulk_edit_document(
             .first()
         )
         if page:
-            page.extracted_text = entry.extracted_text
-            if page.formatting_status == "completed" and page.formatted_text:
-              page.formatted_text = entry.extracted_text
-            updated.append(entry.page_number)
-        else:
-            skipped.append(entry.page_number)
+                 page.extracted_text = entry.extracted_text
+      # Always sync user edits to formatted_text so PDF and viewer use edited version
+                 page.formatted_text = entry.extracted_text
+                 page.formatting_status = "completed"
+                 updated.append(entry.page_number)
+    else:
+        skipped.append(entry.page_number)
 
     db.commit()
     return DocumentEditResponse(
@@ -1067,10 +1068,10 @@ def generate_pdf(
             # prefer extracted_text (user edit) first, then formatted_text,
             # then fall back to raw OCR.
             "extracted_text": (
-                p.extracted_text
-                if p.extracted_text and p.extracted_text.strip()
-                else p.formatted_text or ""
-            ),
+    p.formatted_text
+    if p.formatting_status == "completed" and p.formatted_text and p.formatted_text.strip()
+    else p.extracted_text or ""
+),
             "ocr_type":         p.ocr_type,
             "confidence_score": p.confidence_score,
         }

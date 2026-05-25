@@ -41,6 +41,7 @@ def process_txt_file(file_path: str) -> List[dict]:
                 "extracted_text":   "",
                 "ocr_type":         "digital",
                 "confidence_score": 1.0,
+                "ocr_metadata":     None,
             }]
 
         char_limit  = TXT_PAGE_CHAR_LIMIT
@@ -75,4 +76,5 @@ def _make_page(page_num: int, paragraphs: List[str]) -> dict:
         "extracted_text":   "\n\n".join(paragraphs),
         "ocr_type":         "digital",
         "confidence_score": 1.0,
+        "ocr_metadata":     None,
     }

@@ -200,6 +200,59 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
+# Patterns that match LLM meta-commentary lines that must never appear in
+# stored formatted_text.  Each pattern is matched against individual lines
+# (case-insensitive).  A line that matches ANY pattern is dropped entirely.
+_LLM_ARTIFACT_PATTERNS: list[_re.Pattern] = [
+    # "Note: …" / "Note — …" footnotes added by Ollama
+    _re.compile(r'^\s*note\s*[:\-\u2013\u2014]', _re.IGNORECASE),
+    # "Here is the reformatted text:" / "Here's the cleaned version:"
+    _re.compile(r'^\s*here\s+(is|are|\'s)\s+the\s+', _re.IGNORECASE),
+    # "I fixed …" / "I restored …" / "I corrected …" / "I removed …"
+    _re.compile(r'^\s*i\s+(fixed|restored|corrected|removed|cleaned|rewrote)', _re.IGNORECASE),
+    # "The following …" preamble lines
+    _re.compile(r'^\s*the following (text|content|document)', _re.IGNORECASE),
+    # Markdown fences that the model may wrap output in
+    _re.compile(r'^\s*```'),
+    # Lone OCR artifact numbers that TrOCR often prepends (e.g. "1903", "1940s.")
+    # Only strip if the entire line is a bare year/decade token with no other words.
+    _re.compile(r'^\s*\d{4}s?\.?\s*$'),
+]
+
+
+def _strip_llm_artifacts(text: str) -> str:
+    """
+    Remove LLM meta-commentary lines from Ollama-formatted OCR output.
+
+    Drops lines that match ``_LLM_ARTIFACT_PATTERNS`` and collapses runs of
+    three or more consecutive blank lines down to two (preserves paragraph
+    breaks without leaving gaping whitespace).
+
+    This is called on every ``formatted_text`` value before it is stored in
+    the database, so the artefacts can never reach the client.
+    """
+    lines = text.splitlines()
+    cleaned: list[str] = []
+    blank_run = 0
+
+    for line in lines:
+        # Drop lines that are LLM commentary.
+        if any(p.search(line) for p in _LLM_ARTIFACT_PATTERNS):
+            logger.debug(f"_strip_llm_artifacts: dropped line: {line!r}")
+            continue
+
+        if line.strip() == "":
+            blank_run += 1
+            # Allow at most 2 consecutive blank lines (paragraph separator).
+            if blank_run <= 2:
+                cleaned.append(line)
+        else:
+            blank_run = 0
+            cleaned.append(line)
+
+    return "\n".join(cleaned).strip()
+
+
 # ── Startup / shutdown ────────────────────────────────────────────────────────
 def _cleanup_revoked_tokens() -> None:
     db = SessionLocal()
@@ -664,11 +717,12 @@ def get_page(
         raise HTTPException(status_code=404, detail="Page not found.")
 
     # Compute display_text: prefer formatted_text when formatting is complete.
-    display = (
+    raw_fmt = (
         page.formatted_text
         if page.formatting_status == "completed" and page.formatted_text
-        else page.extracted_text
+        else None
     )
+    display = _strip_llm_artifacts(raw_fmt) if raw_fmt else (page.extracted_text or "")
     response = PageResponse.model_validate(page)
     response.display_text = display
     return response
@@ -712,11 +766,12 @@ def get_pages(
     )
 
     def _to_page_response(p) -> PageResponse:
-        display = (
+        raw_fmt = (
             p.formatted_text
             if p.formatting_status == "completed" and p.formatted_text
-            else p.extracted_text
+            else None
         )
+        display = _strip_llm_artifacts(raw_fmt) if raw_fmt else (p.extracted_text or "")
         r = PageResponse.model_validate(p)
         r.display_text = display
         return r
@@ -764,11 +819,14 @@ def stream_lines(
 
     def _generate():
         # Use formatted_text when available for better line quality.
-        display_text = (
+        raw_fmt = (
             page.formatted_text
             if page.formatting_status == "completed" and page.formatted_text
-            else page.extracted_text
-        ) or ""
+            else None
+        )
+        display_text = (
+            _strip_llm_artifacts(raw_fmt) if raw_fmt else (page.extracted_text or "")
+        )
         for line_num, line in enumerate(display_text.split("\n"), start=1):
             if line.strip():
                 yield json.dumps({
@@ -865,13 +923,12 @@ def bulk_edit_document(
             .first()
         )
         if page:
-                 page.extracted_text = entry.extracted_text
-      # Always sync user edits to formatted_text so PDF and viewer use edited version
-                 page.formatted_text = entry.extracted_text
-                 page.formatting_status = "completed"
-                 updated.append(entry.page_number)
-    else:
-        skipped.append(entry.page_number)
+            page.extracted_text = entry.extracted_text
+            if page.formatting_status == "completed" and page.formatted_text:
+              page.formatted_text = entry.extracted_text
+            updated.append(entry.page_number)
+        else:
+            skipped.append(entry.page_number)
 
     db.commit()
     return DocumentEditResponse(
@@ -993,11 +1050,16 @@ def view_document(
     ocr_lines: list[OcrLine] = []
     for page in pages:
         # display_text: formatted_text when complete, else raw OCR text.
-        display_text = (
+        # _strip_llm_artifacts is applied here as a safety net in case the
+        # formatting worker stored commentary before the fix was deployed.
+        raw_formatted = (
             page.formatted_text
             if page.formatting_status == "completed" and page.formatted_text
-            else page.extracted_text
-        ) or ""
+            else None
+        )
+        display_text = (
+            _strip_llm_artifacts(raw_formatted) if raw_formatted else (page.extracted_text or "")
+        )
 
         raw_text = page.extracted_text or ""
 
@@ -1068,10 +1130,10 @@ def generate_pdf(
             # prefer extracted_text (user edit) first, then formatted_text,
             # then fall back to raw OCR.
             "extracted_text": (
-    p.formatted_text
-    if p.formatting_status == "completed" and p.formatted_text and p.formatted_text.strip()
-    else p.extracted_text or ""
-),
+                p.extracted_text
+                if p.extracted_text and p.extracted_text.strip()
+                else p.formatted_text or ""
+            ),
             "ocr_type":         p.ocr_type,
             "confidence_score": p.confidence_score,
         }

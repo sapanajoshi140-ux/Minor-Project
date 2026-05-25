@@ -1,25 +1,42 @@
 """
 image_service.py — Preprocess and OCR standalone image files (PNG/JPG/JPEG).
 
-OCR routing (fixed)
--------------------
-ocr_mode == "printed"     → ocr_with_fallback():
-    Tesseract confidence >= 0.60  → Tesseract result.
-    Tesseract confidence <  0.60  → TrOCR also runs; best result kept.
-ocr_mode == "handwritten" → ocr_handwritten() (TrOCR only).
+OCR routing
+-----------
+ocr_mode == "printed"     → tesseract_ocr_page():
+    Full-page Tesseract OCR.  TrOCR is used as a fallback only when Tesseract
+    confidence falls below OCR_HANDWRITTEN_FALLBACK_THRESHOLD (default 0.60).
+    No PaddleOCR/EasyOCR detection is performed.
+
+ocr_mode == "handwritten" → hybrid_ocr_page() (PaddleOCR/EasyOCR detection +
+    TrOCR recognition per crop).  If detection yields nothing → Tesseract with
+    TrOCR fallback.
+
+Output
+------
+process_image_file() returns a list with a single page dict.  ocr_metadata is
+populated (with per-line bboxes, texts, and confidence scores) only for the
+handwritten / hybrid path; it is None for the printed / Tesseract path.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
 from PIL import Image
 
-from services.ocr_service import OCRResult, ocr_with_fallback, ocr_handwritten
+from services.ocr_service import (
+    OCRResult,
+    HybridOCRResult,
+    DetectedLine,
+    tesseract_ocr_page,
+    hybrid_ocr_page,
+    ocr_handwritten,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +87,9 @@ def preprocess_for_printed(image: Image.Image) -> Image.Image:
     thresh   = cv2.adaptiveThreshold(denoised, 255,
                                      cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                      cv2.THRESH_BINARY, blockSize=11, C=2)
-    return Image.fromarray(thresh)
+    # Return as 3-channel RGB so detection backends receive a colour image.
+    # Some line detectors (PaddleOCR, EasyOCR) work better with RGB input.
+    return Image.fromarray(thresh).convert("RGB")
 
 
 def preprocess_for_handwriting(image: Image.Image) -> Image.Image:
@@ -88,6 +107,19 @@ def preprocess_for_handwriting(image: Image.Image) -> Image.Image:
 preprocess_image = preprocess_for_printed
 
 
+# ── Serialisation helper (mirrors pdf_service) ────────────────────────────────
+
+def _serialise_lines(lines: List[DetectedLine]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "bbox":       list(line.bbox),
+            "text":       line.text,
+            "confidence": line.confidence,
+        }
+        for line in lines
+    ]
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def process_image_file(
@@ -95,10 +127,25 @@ def process_image_file(
     ocr_mode: str = "printed",
 ) -> List[dict]:
     """
-    Process a standalone image file.
+    Process a standalone image file and return a single-element list of page dicts.
 
-    ocr_mode "printed"     → Tesseract with TrOCR fallback when conf < 0.60.
-    ocr_mode "handwritten" → TrOCR only.
+    ocr_mode "printed"     → tesseract_ocr_page() — full-page Tesseract with TrOCR
+                             fallback on low confidence.  No detection stage;
+                             ocr_metadata is always None for this path.
+    ocr_mode "handwritten" → hybrid_ocr_page() (PaddleOCR/EasyOCR detection +
+                             TrOCR recognition).  ocr_metadata carries per-line
+                             bboxes, texts, and confidence scores.
+
+    Page dict schema:
+        page_number     : int (always 1 for standalone images)
+        extracted_text  : str
+        ocr_type        : "printed" | "handwritten"
+        confidence_score: float (0–1)
+        ocr_metadata    : dict | None
+            {
+              "lines"   : list of {bbox, text, confidence}  (hybrid path only)
+              "fallback": bool
+            }
     """
     logger.info(f"Processing image '{file_path}' — ocr_mode='{ocr_mode}'.")
     try:
@@ -106,22 +153,31 @@ def process_image_file(
 
         if ocr_mode == "handwritten":
             preprocessed = preprocess_for_handwriting(image)
-            result       = ocr_handwritten(preprocessed)
-        else:
-            preprocessed = preprocess_for_printed(image)
-            result       = ocr_with_fallback(preprocessed)
+            hybrid: HybridOCRResult = hybrid_ocr_page(preprocessed, ocr_type="handwritten")
+            ocr_metadata: Optional[Dict[str, Any]] = {
+                "lines":    _serialise_lines(hybrid.lines),
+                "fallback": hybrid.fallback,
+            }
+            return [{
+                "page_number":      1,
+                "extracted_text":   hybrid.text,
+                "ocr_type":         hybrid.ocr_type,
+                "confidence_score": round(hybrid.confidence, 4),
+                "ocr_metadata":     ocr_metadata,
+            }]
 
-        return [_page_dict(1, result)]
+        else:
+            # Printed — Tesseract only (no PaddleOCR/EasyOCR detection).
+            preprocessed = preprocess_for_printed(image)
+            result: HybridOCRResult = tesseract_ocr_page(preprocessed)
+            return [{
+                "page_number":      1,
+                "extracted_text":   result.text,
+                "ocr_type":         result.ocr_type,
+                "confidence_score": round(result.confidence, 4),
+                "ocr_metadata":     None,
+            }]
 
     except Exception as exc:
         logger.error(f"Image processing error for '{file_path}': {exc}", exc_info=True)
         raise
-
-
-def _page_dict(page_number: int, result: OCRResult) -> dict:
-    return {
-        "page_number":      page_number,
-        "extracted_text":   result.text,
-        "ocr_type":         result.ocr_type,
-        "confidence_score": round(result.confidence, 4),
-    }

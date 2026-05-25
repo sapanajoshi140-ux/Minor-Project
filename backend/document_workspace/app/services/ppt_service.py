@@ -7,12 +7,13 @@ For each slide the service first attempts to extract text (digital path).
 If a slide has NO text shapes but DOES have picture shapes, it is treated
 as an image-based slide:
   - the slide is rendered to a PIL image (via LibreOffice + PyMuPDF)
-  - run through the standard OCR pipeline (Tesseract → TrOCR)
+  - run through tesseract_ocr_page() (Tesseract, with TrOCR fallback on low
+    confidence).  No PaddleOCR/EasyOCR detection is performed.
 
 Output dict keys use DB-aligned names:
     extracted_text   (was "content")
     confidence_score (was "confidence")
-    ocr_json         None for digital slides; OCR JSON for image slides
+    ocr_metadata     always None for image slides (Tesseract path; no line bboxes)
 """
 
 from __future__ import annotations
@@ -74,12 +75,10 @@ def _has_picture(slide) -> bool:
 
 def _render_slide_to_pil(pptx_path: str, slide_index: int) -> Optional[object]:
     """
-    Render a PPTX slide to a PIL Image by converting the deck to PDF first
-    (via LibreOffice if available), then rasterising with PyMuPDF.
+    Render a PPTX slide to a PIL Image via LibreOffice headless → PyMuPDF.
 
-    FIX: previously returned a 1×1 white pixel on failure, which caused
-    OCR to run on a blank image and store empty text with 0.0 confidence
-    silently.  Now returns None so the caller can skip the slide explicitly.
+    Returns None on any failure so the caller can skip the slide explicitly
+    rather than silently storing blank OCR output.
     """
     try:
         import subprocess
@@ -126,7 +125,6 @@ def _render_slide_to_pil(pptx_path: str, slide_index: int) -> Optional[object]:
             return Image.open(io.BytesIO(pix.tobytes("png")))
 
     except Exception as exc:
-        
         logger.warning(
             f"Slide rendering failed (slide index {slide_index}, file '{pptx_path}'): "
             f"{exc} — slide will be skipped."
@@ -138,25 +136,28 @@ def _render_slide_to_pil(pptx_path: str, slide_index: int) -> Optional[object]:
 
 def _ocr_slide(pptx_path: str, slide_index: int) -> Optional[dict]:
     """
-    Render and OCR a single image-only slide.
-    Returns a page-data dict, or None if rendering failed.
+    Render and OCR a single image-only slide via Tesseract (with TrOCR fallback
+    when Tesseract confidence is below threshold).
+
+    No PaddleOCR/EasyOCR detection is performed.  ocr_metadata is always None.
+
+    Returns a partial page-data dict (no page_number), or None if rendering failed.
     """
     from services.image_service import preprocess_for_printed
-    from services.ocr_service import ocr_with_fallback
+    from services.ocr_service import tesseract_ocr_page, HybridOCRResult
 
     pil_image = _render_slide_to_pil(pptx_path, slide_index)
-
-
     if pil_image is None:
         return None
 
     preprocessed = preprocess_for_printed(pil_image)
-    result       = ocr_with_fallback(preprocessed)
+    result: HybridOCRResult = tesseract_ocr_page(preprocessed)
 
     return {
         "extracted_text":   result.text,
         "ocr_type":         result.ocr_type,
         "confidence_score": round(result.confidence, 4),
+        "ocr_metadata":     None,
     }
 
 
@@ -165,17 +166,25 @@ def _ocr_slide(pptx_path: str, slide_index: int) -> Optional[dict]:
 def process_ppt_file(file_path: str) -> List[dict]:
     """
     Parse a .ppt / .pptx file and return one page dict per (non-blank) slide.
-    Image-only slides are OCR-processed automatically; slides that cannot be
-    rendered (e.g. LibreOffice unavailable) are skipped with a warning.
+
+    Image-only slides are processed via hybrid_ocr_page() (detection + TrOCR).
+    Slides that cannot be rendered (e.g. LibreOffice unavailable) are skipped.
+
+    Page dict schema matches the rest of the pipeline:
+        page_number     : int
+        extracted_text  : str
+        ocr_type        : "digital" | "printed"
+        confidence_score: float
+        ocr_metadata    : dict | None
     """
     logger.info(f"Processing PowerPoint: {file_path}")
 
     try:
-        prs   = Presentation(file_path)
-        pages : List[dict] = []
+        prs  = Presentation(file_path)
+        pages: List[dict] = []
 
         for slide_num, slide in enumerate(prs.slides, start=1):
-            slide_idx = slide_num - 1          # 0-based for rendering
+            slide_idx = slide_num - 1   # 0-based for rendering
             parts: List[str] = []
 
             # ── Title ──────────────────────────────────────────────────────
@@ -207,12 +216,11 @@ def process_ppt_file(file_path: str) -> List[dict]:
 
             combined = "\n\n".join(parts).strip()
 
-            # ── Image-only slide → OCR ────────────────────────────────────
+            # ── Image-only slide → hybrid OCR ─────────────────────────────
             if not combined and _has_picture(slide):
-                logger.info(f"Slide {slide_num}: image-only — running OCR.")
+                logger.info(f"Slide {slide_num}: image-only — running hybrid OCR.")
                 ocr_data = _ocr_slide(file_path, slide_idx)
 
-               
                 if ocr_data is None:
                     logger.warning(
                         f"Slide {slide_num}: skipped (rendering unavailable)."
@@ -235,6 +243,7 @@ def process_ppt_file(file_path: str) -> List[dict]:
                 "extracted_text":   combined,
                 "ocr_type":         "digital",
                 "confidence_score": 1.0,
+                "ocr_metadata":     None,
             })
             logger.debug(f"Slide {slide_num}: {len(combined)} chars extracted.")
 
@@ -244,6 +253,7 @@ def process_ppt_file(file_path: str) -> List[dict]:
                 "extracted_text":   "",
                 "ocr_type":         "digital",
                 "confidence_score": 1.0,
+                "ocr_metadata":     None,
             }]
 
         logger.info(f"PowerPoint: {len(pages)} slide(s) processed.")

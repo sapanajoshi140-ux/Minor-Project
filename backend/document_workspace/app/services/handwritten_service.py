@@ -67,8 +67,13 @@ _cache: dict = {}
 # can never accidentally match a real cached value or a plain string.
 _LOAD_FAILED = object()
 
-# Default line-strip configuration — can be overridden per-call.
-# Set to "fast" if throughput is more important than edge-case robustness.
+# Strips whose mean token confidence falls below this are discarded.
+# TrOCR hallucinations typically produce conf < 0.25 on near-blank input.
+MIN_STRIP_CONFIDENCE = 0.25
+
+# Strips whose stripped text is shorter than this (after discarding
+# punctuation-only outputs) are also discarded.
+MIN_STRIP_TEXT_LEN = 2
 DEFAULT_STRIP_CONFIG = LineStripConfig(algorithm="hybrid")
 
 
@@ -297,10 +302,27 @@ def run_trocr(
 
         for idx, strip in enumerate(strips):
             text, conf = _run_strip(strip, processor, model, device)
-            if text:
-                lines.append(text)
-                confidences.append(conf)
-                logger.debug(f"  strip {idx}: conf={conf:.3f} text='{text[:60]}'")
+
+            # Gate 1: confidence — low confidence almost always means TrOCR
+            # received a near-blank or artifact strip and is hallucinating.
+            if conf < MIN_STRIP_CONFIDENCE:
+                logger.debug(
+                    f"  strip {idx}: DROPPED conf={conf:.3f} < {MIN_STRIP_CONFIDENCE}"
+                    f" text='{text[:60]}'"
+                )
+                continue
+
+            # Gate 2: meaningful text — discard empty or punctuation-only results.
+            clean = text.strip()
+            if len(clean) < MIN_STRIP_TEXT_LEN:
+                logger.debug(
+                    f"  strip {idx}: DROPPED short text='{clean}' (conf={conf:.3f})"
+                )
+                continue
+
+            lines.append(clean)
+            confidences.append(conf)
+            logger.debug(f"  strip {idx}: conf={conf:.3f} text='{clean[:60]}'")
 
         mean_conf = (
             round(sum(confidences) / len(confidences), 4)

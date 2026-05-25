@@ -4,13 +4,12 @@ pdf_service.py — handles both digital and scanned PDFs.
 OCR routing
 -----------
 Digital pages    → text extracted directly by PyMuPDF; no OCR.
-Scanned pages    → hybrid_ocr_page() (PaddleOCR/EasyOCR detection + TrOCR):
-    If detection yields lines         → TrOCR recognises each crop; lines merged.
-    If detection yields nothing       → Tesseract with TrOCR fallback (conf < 0.60).
-Handwritten      → ocr_handwritten() (TrOCR only, no Tesseract).
+Scanned pages    → tesseract_ocr_page() (Tesseract, with TrOCR fallback on
+                   low confidence).  No PaddleOCR/EasyOCR detection is run.
+Handwritten      → hybrid_ocr_page() (PaddleOCR/EasyOCR detection + TrOCR).
 
 Output includes per-line bounding boxes and confidence scores when the hybrid
-pipeline runs, stored in ocr_metadata for downstream use (search, highlighting).
+pipeline runs (handwritten only); scanned pages always have an empty lines list.
 
 Streaming
 ---------
@@ -32,6 +31,7 @@ from services.image_service import preprocess_for_printed, preprocess_for_handwr
 from services.ocr_service import (
     hybrid_ocr_page,
     ocr_handwritten,
+    tesseract_ocr_page,
     HybridOCRResult,
     DetectedLine,
 )
@@ -88,8 +88,9 @@ def process_pdf_file(
 
     document_category:
         "text"        → digital PDF; extracted_text=None, no OCR run.
-        "scanned"     → hybrid pipeline (detection + TrOCR) with Tesseract fallback.
-        "handwritten" → TrOCR only via ocr_handwritten().
+        "scanned"     → tesseract_ocr_page() (Tesseract, TrOCR fallback on low
+                         confidence).  lines is always empty for this path.
+        "handwritten" → hybrid_ocr_page() (PaddleOCR/EasyOCR detection + TrOCR).
 
     Page dict schema (all keys always present):
         page_number     : int
@@ -152,19 +153,18 @@ def process_pdf_file(
                 }
 
             else:
-                # ── Hybrid pipeline (printed / scanned) ───────────────────────
-                # Preprocess before detection: deskew, denoise, adaptive threshold.
+                # ── Tesseract path (printed / scanned) ───────────────────────
+                # Full-page Tesseract OCR; TrOCR is used as a fallback only
+                # when Tesseract confidence is below threshold.
+                # No PaddleOCR/EasyOCR detection is performed.
                 preprocessed = preprocess_for_printed(pil_image)
 
-                hybrid: HybridOCRResult = hybrid_ocr_page(
-                    preprocessed, ocr_type="printed"
-                )
+                hybrid: HybridOCRResult = tesseract_ocr_page(preprocessed)
 
                 logger.info(
-                    f"Page {page_num}: hybrid OCR "
-                    f"({'fallback' if hybrid.fallback else 'detection'}), "
+                    f"Page {page_num}: Tesseract OCR "
+                    f"({'trocr-fallback' if hybrid.ocr_type == 'handwritten' else 'tesseract'}), "
                     f"confidence={hybrid.confidence:.3f}, "
-                    f"lines={len(hybrid.lines)}, "
                     f"chars={len(hybrid.text)}."
                 )
 

@@ -5,18 +5,13 @@ ocr_service.py — OCR routing: Tesseract for printed, TrOCR for handwritten,
 
 Routing rules
 -------------
-Printed documents  → Tesseract first.
-    If Tesseract confidence >= OCR_HANDWRITTEN_FALLBACK_THRESHOLD (default 0.60)
-        → accept Tesseract result.
-    If confidence < threshold
-        → re-run with TrOCR (handwritten model).
-        → keep whichever result has the higher confidence score.
+Printed / scanned documents → Tesseract only via tesseract_ocr_page().
+    Returns a HybridOCRResult with fallback=True and empty lines list.
+    No PaddleOCR/EasyOCR detection is performed.
+    If Tesseract confidence < OCR_HANDWRITTEN_FALLBACK_THRESHOLD (default 0.60)
+        → also run TrOCR, keep the better result (ocr_with_fallback behaviour).
 
-Handwritten documents → TrOCR directly; Tesseract is never called.
-
-Hybrid pipeline (new)
----------------------
-hybrid_ocr_page(image) — preferred path for scanned pages:
+Handwritten documents → hybrid_ocr_page() (detection + TrOCR):
     1. Detect text line bounding boxes via PaddleOCR (primary) or EasyOCR
        (fallback).  Their *recognition* output is discarded; only bounding
        boxes are used.
@@ -197,6 +192,32 @@ def ocr_with_fallback(image: Image.Image) -> OCRResult:
     except Exception as exc:
         logger.warning(f"TrOCR fallback failed ({exc}); keeping Tesseract result.")
         return OCRResult(text=tess_text, confidence=tess_conf, ocr_type="printed")
+
+
+def tesseract_ocr_page(image: Image.Image) -> HybridOCRResult:
+    """
+    Tesseract-only OCR for printed / scanned pages.
+
+    No PaddleOCR or EasyOCR detection is performed — Tesseract processes the
+    full page image directly.  If Tesseract confidence falls below
+    OCR_HANDWRITTEN_FALLBACK_THRESHOLD the result is compared against a TrOCR
+    pass and the better result is kept (ocr_with_fallback behaviour).
+
+    Returns a HybridOCRResult so callers share the same return type as
+    hybrid_ocr_page().  lines is always empty and fallback is always True
+    because no line-detection stage is run.
+
+    Use this for all printed / scanned documents.
+    Use hybrid_ocr_page() for handwritten documents only.
+    """
+    result = ocr_with_fallback(image)
+    return HybridOCRResult(
+        text=result.text,
+        confidence=result.confidence,
+        ocr_type=result.ocr_type,
+        lines=[],
+        fallback=True,
+    )
 
 
 # ── Legacy alias ──────────────────────────────────────────────────────────────
@@ -645,10 +666,13 @@ def reconstruct_page_text(lines: List[DetectedLine]) -> str:
 
 def hybrid_ocr_page(
     image: Image.Image,
-    ocr_type: str = "printed",
+    ocr_type: str = "handwritten",
 ) -> HybridOCRResult:
     """
-    Full hybrid OCR pipeline for a single page image.
+    Hybrid OCR pipeline for handwritten pages (detection + TrOCR recognition).
+
+    Use tesseract_ocr_page() for printed / scanned documents — it is faster
+    and avoids loading PaddleOCR/EasyOCR unnecessarily.
 
     Steps
     -----
@@ -663,7 +687,8 @@ def hybrid_ocr_page(
     Parameters
     ----------
     image    : preprocessed PIL.Image (grayscale or RGB, deskewed, denoised).
-    ocr_type : "printed" | "handwritten" — stored in HybridOCRResult.ocr_type.
+    ocr_type : stored in HybridOCRResult.ocr_type — should always be
+               "handwritten" for this pipeline.
 
     Returns
     -------

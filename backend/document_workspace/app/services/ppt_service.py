@@ -7,12 +7,13 @@ For each slide the service first attempts to extract text (digital path).
 If a slide has NO text shapes but DOES have picture shapes, it is treated
 as an image-based slide:
   - the slide is rendered to a PIL image (via LibreOffice + PyMuPDF)
-  - run through the hybrid OCR pipeline (detection + TrOCR, Tesseract fallback)
+  - run through tesseract_ocr_page() (Tesseract, with TrOCR fallback on low
+    confidence).  No PaddleOCR/EasyOCR detection is performed.
 
 Output dict keys use DB-aligned names:
     extracted_text   (was "content")
     confidence_score (was "confidence")
-    ocr_metadata     dict | None — per-line bboxes and confidence (hybrid path)
+    ocr_metadata     always None for image slides (Tesseract path; no line bboxes)
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from __future__ import annotations
 import io
 import logging
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -131,45 +132,30 @@ def _render_slide_to_pil(pptx_path: str, slide_index: int) -> Optional[object]:
         return None
 
 
-# ── OCR for image slide ───────────────────────────────────────────────────────
-
-def _serialise_lines(lines) -> List[Dict[str, Any]]:
-    return [
-        {
-            "bbox":       list(line.bbox),
-            "text":       line.text,
-            "confidence": line.confidence,
-        }
-        for line in lines
-    ]
-
-
-def _ocr_slide(pptx_path: str, slide_index: int) -> Optional[dict]:
+# ── OCR for image slide ───────────────────────────────────────────────────────def _ocr_slide(pptx_path: str, slide_index: int) -> Optional[dict]:
     """
-    Render and OCR a single image-only slide via the hybrid pipeline.
+    Render and OCR a single image-only slide via Tesseract (with TrOCR fallback
+    when Tesseract confidence is below threshold).
+
+    No PaddleOCR/EasyOCR detection is performed.  ocr_metadata is always None.
 
     Returns a partial page-data dict (no page_number), or None if rendering failed.
-    The hybrid pipeline attempts PaddleOCR/EasyOCR detection + TrOCR; if no
-    lines are detected it falls back to Tesseract automatically.
     """
     from services.image_service import preprocess_for_printed
-    from services.ocr_service import hybrid_ocr_page, HybridOCRResult
+    from services.ocr_service import tesseract_ocr_page, HybridOCRResult
 
     pil_image = _render_slide_to_pil(pptx_path, slide_index)
     if pil_image is None:
         return None
 
     preprocessed = preprocess_for_printed(pil_image)
-    hybrid: HybridOCRResult = hybrid_ocr_page(preprocessed, ocr_type="printed")
+    result: HybridOCRResult = tesseract_ocr_page(preprocessed)
 
     return {
-        "extracted_text":   hybrid.text,
-        "ocr_type":         hybrid.ocr_type,
-        "confidence_score": round(hybrid.confidence, 4),
-        "ocr_metadata": {
-            "lines":    _serialise_lines(hybrid.lines),
-            "fallback": hybrid.fallback,
-        },
+        "extracted_text":   result.text,
+        "ocr_type":         result.ocr_type,
+        "confidence_score": round(result.confidence, 4),
+        "ocr_metadata":     None,
     }
 
 

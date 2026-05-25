@@ -3,17 +3,20 @@ image_service.py — Preprocess and OCR standalone image files (PNG/JPG/JPEG).
 
 OCR routing
 -----------
-ocr_mode == "printed"     → hybrid_ocr_page():
-    PaddleOCR/EasyOCR line detection → TrOCR recognition per crop.
-    If detection yields nothing → Tesseract with TrOCR fallback (conf < 0.60).
+ocr_mode == "printed"     → tesseract_ocr_page():
+    Full-page Tesseract OCR.  TrOCR is used as a fallback only when Tesseract
+    confidence falls below OCR_HANDWRITTEN_FALLBACK_THRESHOLD (default 0.60).
+    No PaddleOCR/EasyOCR detection is performed.
 
-ocr_mode == "handwritten" → ocr_handwritten() (TrOCR only, no Tesseract).
+ocr_mode == "handwritten" → hybrid_ocr_page() (PaddleOCR/EasyOCR detection +
+    TrOCR recognition per crop).  If detection yields nothing → Tesseract with
+    TrOCR fallback.
 
 Output
 ------
-process_image_file() returns a list with a single page dict that now includes
-ocr_metadata with per-line bounding boxes, texts, and confidence scores when
-the hybrid pipeline runs.
+process_image_file() returns a list with a single page dict.  ocr_metadata is
+populated (with per-line bboxes, texts, and confidence scores) only for the
+handwritten / hybrid path; it is None for the printed / Tesseract path.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from services.ocr_service import (
     OCRResult,
     HybridOCRResult,
     DetectedLine,
+    tesseract_ocr_page,
     hybrid_ocr_page,
     ocr_handwritten,
 )
@@ -125,9 +129,12 @@ def process_image_file(
     """
     Process a standalone image file and return a single-element list of page dicts.
 
-    ocr_mode "printed"     → hybrid pipeline (detection + TrOCR) with Tesseract
-                             fallback when no lines are detected.
-    ocr_mode "handwritten" → TrOCR only (no line detection).
+    ocr_mode "printed"     → tesseract_ocr_page() — full-page Tesseract with TrOCR
+                             fallback on low confidence.  No detection stage;
+                             ocr_metadata is always None for this path.
+    ocr_mode "handwritten" → hybrid_ocr_page() (PaddleOCR/EasyOCR detection +
+                             TrOCR recognition).  ocr_metadata carries per-line
+                             bboxes, texts, and confidence scores.
 
     Page dict schema:
         page_number     : int (always 1 for standalone images)
@@ -146,31 +153,29 @@ def process_image_file(
 
         if ocr_mode == "handwritten":
             preprocessed = preprocess_for_handwriting(image)
-            result       = ocr_handwritten(preprocessed)
-            return [{
-                "page_number":      1,
-                "extracted_text":   result.text,
-                "ocr_type":         result.ocr_type,
-                "confidence_score": round(result.confidence, 4),
-                "ocr_metadata":     None,
-            }]
-
-        else:
-            # Printed — use hybrid detection + TrOCR pipeline
-            preprocessed = preprocess_for_printed(image)
-            hybrid: HybridOCRResult = hybrid_ocr_page(preprocessed, ocr_type="printed")
-
+            hybrid: HybridOCRResult = hybrid_ocr_page(preprocessed, ocr_type="handwritten")
             ocr_metadata: Optional[Dict[str, Any]] = {
                 "lines":    _serialise_lines(hybrid.lines),
                 "fallback": hybrid.fallback,
             }
-
             return [{
                 "page_number":      1,
                 "extracted_text":   hybrid.text,
                 "ocr_type":         hybrid.ocr_type,
                 "confidence_score": round(hybrid.confidence, 4),
                 "ocr_metadata":     ocr_metadata,
+            }]
+
+        else:
+            # Printed — Tesseract only (no PaddleOCR/EasyOCR detection).
+            preprocessed = preprocess_for_printed(image)
+            result: HybridOCRResult = tesseract_ocr_page(preprocessed)
+            return [{
+                "page_number":      1,
+                "extracted_text":   result.text,
+                "ocr_type":         result.ocr_type,
+                "confidence_score": round(result.confidence, 4),
+                "ocr_metadata":     None,
             }]
 
     except Exception as exc:

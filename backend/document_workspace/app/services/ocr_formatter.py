@@ -51,7 +51,48 @@ from config import (
     FORMAT_MAX_RETRIES,
 )
 
+import re as _re
+
 logger = logging.getLogger(__name__)
+
+# ── Artifact patterns (mirrors main._LLM_ARTIFACT_PATTERNS) ──────────────────
+# Defined here so ocr_formatter can strip commentary before writing to the DB,
+# independently of the read-path guard in main.py.
+_ARTIFACT_LINE_PATTERNS: list[_re.Pattern] = [
+    _re.compile(r'^\s*note\s*[:\-\u2013\u2014]', _re.IGNORECASE),
+    _re.compile(r'^\s*here\s+(is|are|\'s)\s+the\s+', _re.IGNORECASE),
+    _re.compile(r'^\s*i\s+(fixed|restored|corrected|removed|cleaned|rewrote)', _re.IGNORECASE),
+    _re.compile(r'^\s*the following (text|content|document)', _re.IGNORECASE),
+    _re.compile(r'^\s*corrected text\s*[:\-]?\s*$', _re.IGNORECASE),
+    _re.compile(r'^\s*```'),
+    _re.compile(r'^\s*\d{4}s?\.?\s*$'),
+]
+
+
+def _strip_formatter_artifacts(text: str) -> str:
+    """
+    Remove LLM meta-commentary lines from an Ollama response chunk.
+
+    Called on every chunk returned by _call_ollama before it is stored,
+    so commentary never reaches formatted_text in the database.
+    Also strips the "Corrected text:" label that the user-turn prompt
+    elicits as a prefix on some models.
+    """
+    lines = text.splitlines()
+    cleaned: list[str] = []
+    blank_run = 0
+    for line in lines:
+        if any(p.search(line) for p in _ARTIFACT_LINE_PATTERNS):
+            logger.debug(f"ocr_formatter: stripped artifact line: {line!r}")
+            continue
+        if line.strip() == "":
+            blank_run += 1
+            if blank_run <= 2:
+                cleaned.append(line)
+        else:
+            blank_run = 0
+            cleaned.append(line)
+    return "\n".join(cleaned).strip()
 
 # ── Shared in-process queue ───────────────────────────────────────────────────
 # Lazily initialised inside run_formatting_worker() which runs after the
@@ -148,6 +189,24 @@ def release_doc_stream(document_id: str, queue: "asyncio.Queue") -> None:
     logger.debug(f"Stream: released subscriber for doc {document_id}.")
 
 
+def notify_page_processing(document_id: str, page_number: int) -> None:
+    """
+    Broadcast a "processing" event to all SSE subscribers of *document_id*.
+
+    Called by upload.py / the streaming loop immediately before OCR starts on
+    a page so the frontend can display "Processing page X…" without waiting for
+    the result.
+
+    Must be called from the asyncio event loop.
+    """
+    notify_page_event(document_id, {
+        "event_type":  "processing",
+        "page_number": page_number,
+        "status":      "ocr_started",
+    })
+
+
+
 # Event-loop reference — set once by run_formatting_worker() at startup.
 # Used by thread-pool DB helpers to schedule SSE notifications safely.
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -202,34 +261,38 @@ def enqueue_page(page_id: int) -> None:
 # Ollama formatting call
 # ══════════════════════════════════════════════════════════════════════════════
 
-_FORMAT_SYSTEM_PROMPT = """You are a precise OCR text formatter. 
-Your ONLY job is to fix the structure and readability of OCR-extracted text.
+_FORMAT_SYSTEM_PROMPT = """\
+You are an OCR text formatter. Your job is to clean up the structure of \
+OCR-extracted text and return it — nothing more.
 
-Rules you MUST follow:
-- DO NOT add, invent, or hallucinate any content that was not in the input.
-- DO NOT summarize, paraphrase, or omit any content.
-- DO NOT add commentary, explanations, or preamble.
-- Output ONLY the reformatted text — nothing else.
+ABSOLUTE OUTPUT RULES — violating any of these is a critical failure:
+1. Output ONLY the corrected document text. No other content whatsoever.
+2. Do NOT start your reply with any preamble. Your first character must be \
+the first character of the corrected text.
+3. Do NOT end your reply with any footnote, note, comment, or explanation. \
+Your last character must be the last character of the corrected text.
+4. NEVER write lines starting with: "Note:", "Note —", "Here is", "Here's", \
+"I fixed", "I restored", "I corrected", "I removed", "The following".
+5. NEVER wrap the output in markdown code fences (```).
 
-What you SHOULD fix:
-- Detect and mark headings/subheadings using Markdown (# H1, ## H2, ### H3).
-- Restore broken paragraphs: if a sentence is split across lines by a stray
-  newline, join the lines back into one paragraph.
-- Remove random mid-sentence line breaks caused by OCR column detection.
+Fixes to apply:
+- Mark headings with Markdown (# H1, ## H2, ### H3) where clearly indicated.
+- Re-join sentences that were broken across lines by OCR column errors.
 - Preserve intentional paragraph breaks (blank lines between topics).
-- Detect and format bullet/numbered lists properly.
-- Fix obvious OCR spacing errors (e.g. "w ord" → "word", "hel lo" → "hello").
-- Preserve the original word order and meaning exactly.
-- Group related sentences into coherent paragraphs."""
+- Format bullet or numbered lists correctly.
+- Fix obvious OCR spacing artefacts ("w ord" → "word", "hel lo" → "hello").
+- Preserve original word order, meaning, and all content exactly."""
 
 
 def _build_format_prompt(raw_chunk: str) -> str:
     return (
-        "Reformat the following OCR-extracted text to improve readability. "
-        "Fix structure only — do not change meaning or add content.\n\n"
+        "Reformat the OCR text below. Fix structure only — do not change meaning "
+        "or add content. Return the corrected text immediately with no preamble, "
+        "no trailing note, and no explanation of what you changed.\n\n"
         "--- BEGIN OCR TEXT ---\n"
         f"{raw_chunk}\n"
-        "--- END OCR TEXT ---"
+        "--- END OCR TEXT ---\n\n"
+        "Corrected text (start immediately, no preamble, no trailing note):"
     )
 
 
@@ -286,6 +349,18 @@ def _call_ollama(raw_text: str) -> str:
 
         if not formatted_chunk:
             raise ValueError(f"Ollama returned empty content for chunk {idx + 1}.")
+
+        # Strip any meta-commentary the model appended despite the prompt rules.
+        formatted_chunk = _strip_formatter_artifacts(formatted_chunk)
+
+        # If stripping consumed everything, fall back to the raw chunk rather
+        # than storing blank — better to show slightly rough OCR than nothing.
+        if not formatted_chunk.strip():
+            logger.warning(
+                f"Formatter chunk {idx+1}: entire response was artifact text; "
+                f"keeping raw OCR chunk as fallback."
+            )
+            formatted_chunk = chunk.strip()
 
         formatted_chunks.append(formatted_chunk)
         logger.debug(

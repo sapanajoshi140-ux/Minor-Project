@@ -99,12 +99,13 @@ class LineStripConfig:
         Radius for OpenCV inpainting over detected line pixels.  Default 4.
     """
     algorithm:         Literal["hybrid", "fast", "original"] = "hybrid"
-    min_strip_height:  int   = 12
+    min_strip_height:  int   = 20       # raised: avoids tiny artifact bands
     strip_padding:     int   = 6
     clahe_clip:        float = 2.5
     remove_red_lines:  bool  = True
-    remove_blue_lines: bool  = False
+    remove_blue_lines: bool  = True     # fixed: blue ruling is the common case
     inpaint_radius:    int   = 4
+    min_ink_ratio:     float = 0.008    # new: strips below this ink density are dropped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -409,8 +410,10 @@ def _detect_text_bands(gray: np.ndarray,
     if in_band and (h - start) >= min_height:
         raw_bands.append((start, h))
 
-    # Merge adjacent bands separated by ≤ 8px (split ascenders/descenders)
-    MAX_GAP = 4
+    # Merge adjacent bands separated by ≤ 8px (split ascenders/descenders).
+    # 8px is wide enough to bridge ascender/descender gaps without collapsing
+    # genuinely separate lines (which are typically ≥ 12px apart after CLAHE).
+    MAX_GAP = 8
     merged: list[tuple[int, int]] = []
     for band in raw_bands:
         if merged and (band[0] - merged[-1][1]) <= MAX_GAP:
@@ -474,8 +477,24 @@ def split_into_line_strips(
     # ── Crop strips with padding ─────────────────────────────────────────────
     h, w = gray_clean.shape
     pad = cfg.strip_padding
-    strips = [
-        pil_clean.crop((0, max(0, t - pad), w, min(h, b + pad)))
-        for t, b in bands
-    ]
+    strips = []
+    for t, b in bands:
+        crop_t = max(0, t - pad)
+        crop_b = min(h, b + pad)
+        strip_gray = gray_clean[crop_t:crop_b, :]
+        # Drop nearly-blank strips: they cause TrOCR to hallucinate.
+        # ink_ratio = fraction of pixels darker than 200 (ink on white).
+        ink_ratio = (strip_gray < 200).sum() / max(strip_gray.size, 1)
+        if ink_ratio < cfg.min_ink_ratio:
+            logger.debug(
+                f"  Dropping strip rows {crop_t}-{crop_b}: "
+                f"ink_ratio={ink_ratio:.4f} < threshold {cfg.min_ink_ratio}"
+            )
+            continue
+        strips.append(pil_clean.crop((0, crop_t, w, crop_b)))
+
+    if not strips:
+        logger.warning("All strips dropped by ink-density filter — returning full image.")
+        return [pil_clean]
+
     return strips

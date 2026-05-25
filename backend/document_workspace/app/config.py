@@ -93,6 +93,28 @@ TROCR_PRINTED_PATH                 = os.getenv("TROCR_PRINTED_PATH")
 TROCR_HANDWRITTEN_PATH             = os.getenv("TROCR_HANDWRITTEN_PATH")
 LIBREOFFICE_PATH                   = os.getenv("LIBREOFFICE_PATH", "libreoffice")
 
+# ── Hybrid OCR pipeline (PaddleOCR/EasyOCR detection + TrOCR recognition) ────
+# HYBRID_DETECTION_BACKEND
+#   "auto"   — try PaddleOCR first, fall back to EasyOCR, then Tesseract.
+#   "paddle" — PaddleOCR only (raises if not installed).
+#   "easy"   — EasyOCR only (raises if not installed).
+HYBRID_DETECTION_BACKEND = os.getenv("HYBRID_DETECTION_BACKEND", "auto").strip().lower()
+
+# Per-line confidence gate: TrOCR lines whose mean token confidence is below
+# this value are discarded before text reconstruction.  Raise to be stricter
+# (fewer hallucinated lines kept); lower if you are losing real but faint text.
+HYBRID_MIN_LINE_CONF     = _float("HYBRID_MIN_LINE_CONF", 0.20)
+
+# Number of cropped line images sent to TrOCR in a single batch forward pass.
+# Higher values use more GPU VRAM but reduce total inference time on long pages.
+# Decrease if you hit CUDA out-of-memory errors on large/dense scans.
+HYBRID_TROCR_BATCH_SIZE  = _int("HYBRID_TROCR_BATCH_SIZE", 8)
+
+# Maximum number of new tokens TrOCR may generate per line crop.
+# 128 is sufficient for a typical text line; raise for very long lines or
+# dense tables, lower for faster inference on short captions/labels.
+TROCR_MAX_NEW_TOKENS     = _int("TROCR_MAX_NEW_TOKENS", 128)
+
 # ── TXT pagination ────────────────────────────────────────────────────────────
 TXT_PAGE_CHAR_LIMIT    = _int("TXT_PAGE_CHAR_LIMIT",    3000)
 PAGE_COMMIT_BATCH_SIZE = _int("PAGE_COMMIT_BATCH_SIZE", 10)
@@ -168,7 +190,7 @@ def setup_logging(log_file: str | None = None) -> None:
 
     logging.basicConfig(level=level, handlers=handlers, force=True)
 
-    for name in ("urllib3", "PIL", "easyocr", "fitz", "multipart"):
+    for name in ("urllib3", "PIL", "easyocr", "ppocr", "fitz", "multipart", "paddleocr"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 

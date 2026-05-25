@@ -72,6 +72,7 @@ def process_doc_file(file_path: str) -> List[dict]:
                 "extracted_text":   "",
                 "ocr_type":         "digital",
                 "confidence_score": 1.0,
+                "ocr_metadata":     None,
             }]
 
         chunks = [
@@ -85,6 +86,7 @@ def process_doc_file(file_path: str) -> List[dict]:
                 "extracted_text":   "\n".join(chunk),
                 "ocr_type":         "digital",
                 "confidence_score": 1.0,
+                "ocr_metadata":     None,
             }
             for page_num, chunk in enumerate(chunks, start=1)
         ]

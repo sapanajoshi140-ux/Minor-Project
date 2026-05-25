@@ -19,6 +19,69 @@ const TypingDots = () => (
   </span>
 );
 
+// ── Icon components ───────────────────────────────────────────────────────────
+const CopyIcon = () => (
+  <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <rect x="9" y="9" width="13" height="13" rx="2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>
+);
+
+const CheckIcon = () => (
+  <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
+  </svg>
+);
+
+const ThumbUpIcon = () => (
+  <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 9V5a3 3 0 00-3-3l-4 10v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3H14z" />
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3" />
+  </svg>
+);
+
+const ThumbDownIcon = () => (
+  <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 15v4a3 3 0 003 3l4-10V2H5.72a2 2 0 00-2 1.7l-1.38 9a2 2 0 002 2.3H10z" />
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 2h2.67A2.31 2.31 0 0122 4v7a2.31 2.31 0 01-2.33 2H17" />
+  </svg>
+);
+
+const RegenerateIcon = () => (
+  <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+  </svg>
+);
+
+const StopIcon = () => (
+  <svg width="12" height="12" fill="currentColor" viewBox="0 0 24 24">
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+  </svg>
+);
+
+const ExportIcon = () => (
+  <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+  </svg>
+);
+
+// ── Message action button ─────────────────────────────────────────────────────
+const ActionBtn = ({ onClick, title, active, activeColor, children }) => (
+  <button
+    onClick={onClick}
+    title={title}
+    className="p-1 rounded-md transition-all duration-150"
+    style={{
+      color: active ? activeColor || 'var(--page-text)' : 'var(--muted-text)',
+      background: 'transparent',
+    }}
+    onMouseEnter={e => { if (!active) e.currentTarget.style.color = 'var(--page-text)'; e.currentTarget.style.background = 'var(--bubble-ai-border, var(--page-border))'; }}
+    onMouseLeave={e => { e.currentTarget.style.color = active ? activeColor || 'var(--page-text)' : 'var(--muted-text)'; e.currentTarget.style.background = 'transparent'; }}
+  >
+    {children}
+  </button>
+);
+
 // ── Animated placeholder hook ─────────────────────────────────────────────────
 const PLACEHOLDER_QUESTIONS = [
   'What is the main topic?',
@@ -70,92 +133,160 @@ const useAnimatedPlaceholder = (active) => {
   return placeholder;
 };
 
-// ── Fake typing illusion bubble ───────────────────────────────────────────────
-const FakeTypingBubble = () => (
-  <div
-    className="px-3.5 py-3 rounded-2xl rounded-tl-sm shadow-sm"
-    style={{
-      background: 'var(--bubble-ai-bg, var(--page-bg))',
-      border: '1px solid var(--bubble-ai-border, var(--page-border))',
-    }}
-  >
-    <TypingDots />
+// ── User message ──────────────────────────────────────────────────────────────
+const UserMessage = ({ content }) => (
+  <div className="flex justify-end">
+    <div
+      className="font-Inter font-semibold max-w-[82%] sm:max-w-[78%] px-3.5 py-2.5 rounded-2xl rounded-tr-sm text-[13px] leading-relaxed"
+      style={{
+        background: 'var(--bubble-user-bg, #4f46e5)',
+        color: 'var(--bubble-user-text, #ffffff)',
+      }}
+    >
+      {content}
+    </div>
   </div>
 );
 
-// ── Animated assistant bubble ─────────────────────────────────────────────────
-const AssistantBubble = ({ content, streaming }) => (
-  <div
-    className="max-w-[82%] sm:max-w-[78%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed rounded-tl-sm shadow-sm"
-    style={{
-      background: 'var(--bubble-ai-bg, var(--page-bg))',
-      border: '1px solid var(--bubble-ai-border, var(--page-border))',
-      color: 'var(--bubble-ai-text, var(--page-text))',
-    }}
-  >
-    {content}
-    {streaming && (
+// ── Assistant message with action bar ────────────────────────────────────────
+const AssistantMessage = ({ content, streaming, onCopy, onThumb, onRegenerate, thumbState }) => {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    onCopy(content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="flex flex-col gap-0.5 group">
       <span
-        className="inline-block w-0.5 h-3.5 ml-0.5 animate-pulse align-middle"
-        style={{ background: 'var(--muted-text)' }}
-      />
-    )}
+        className="text-[15px] font-bold uppercase tracking-wider"
+        style={{ color: 'var(--muted-text)' }}
+      >
+        Assistant
+      </span>
+      <p
+        className="text-[14px] leading-relaxed font-Inter font-semibold"
+        style={{ color: 'var(--page-text)' }}
+      >
+        {content}
+        {streaming && (
+          <span
+            className="inline-block w-0.5 h-3.5 ml-0.5 animate-pulse align-middle"
+            style={{ background: 'var(--muted-text)' }}
+          />
+        )}
+      </p>
+
+      {/* Action bar — visible on hover or after streaming */}
+      {!streaming && (
+        <div
+          className="flex items-center gap-0.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150"
+        >
+          {/* Copy */}
+          <ActionBtn onClick={handleCopy} title={copied ? 'Copied!' : 'Copy'} active={copied} activeColor="#22c55e">
+            {copied ? <CheckIcon /> : <CopyIcon />}
+          </ActionBtn>
+
+          {/* Thumb up */}
+          <ActionBtn
+            onClick={() => onThumb('up')}
+            title="Good response"
+            active={thumbState === 'up'}
+            activeColor="#22c55e"
+          >
+            <ThumbUpIcon />
+          </ActionBtn>
+
+          {/* Thumb down */}
+          <ActionBtn
+            onClick={() => onThumb('down')}
+            title="Bad response"
+            active={thumbState === 'down'}
+            activeColor="#ef4444"
+          >
+            <ThumbDownIcon />
+          </ActionBtn>
+
+          {/* Regenerate */}
+          <ActionBtn onClick={onRegenerate} title="Regenerate response">
+            <RegenerateIcon />
+          </ActionBtn>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── Typing indicator ──────────────────────────────────────────────────────────
+const TypingIndicator = () => (
+  <div className="flex justify-start">
+    <div
+      className="px-3.5 py-3 rounded-2xl rounded-tl-sm shadow-sm"
+      style={{
+        background: 'var(--bubble-ai-bg, var(--page-bg))',
+        border: '1px solid var(--bubble-ai-border, var(--page-border))',
+      }}
+    >
+      <TypingDots />
+    </div>
   </div>
 );
 
 // ── Summary card ──────────────────────────────────────────────────────────────
 const SummaryCard = ({ selectedText, result }) => (
-  <div className="flex justify-start">
-    <div className="max-w-[95%] sm:max-w-[90%] w-full">
-      <div className="flex items-center gap-1.5 mb-1.5 ml-1">
-        <span className="text-[10px] font-semibold text-purple-500 uppercase tracking-wider">✨ Summary</span>
-      </div>
-      <div
-        className="rounded-2xl rounded-tl-sm overflow-hidden shadow-sm"
-        style={{
-          background: 'var(--bubble-ai-bg, var(--page-bg))',
-          border: '1px solid var(--bubble-ai-border, var(--page-border))',
-        }}
-      >
-        <div
-          className="px-3.5 pt-3 pb-2"
-          style={{ borderBottom: '1px solid var(--bubble-ai-border, var(--page-border))' }}
-        >
-          <p className="text-[10px] font-bold text-purple-400 uppercase tracking-wider mb-1">Selected text</p>
-          <p
-            className="text-[12px] italic leading-relaxed line-clamp-3"
-            style={{ color: 'var(--muted-text)' }}
-          >
-            "{selectedText}"
-          </p>
+  <div className="flex flex-col gap-2 py-1">
+    <div className="pl-3 border-l-2" style={{ borderColor: 'rgba(139,92,246,0.5)' }}>
+      <p className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider mb-0.5">Selected text</p>
+      <p className="text-[12px] italic leading-relaxed line-clamp-3" style={{ color: 'var(--muted-text)' }}>
+        "{selectedText}"
+      </p>
+    </div>
+    <div>
+      <p className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider mb-1">✨ Summary</p>
+      {result === null ? (
+        <div className="space-y-2 animate-pulse">
+          {[100, 83, 66].map((w, i) => (
+            <div key={i} className="h-3 rounded" style={{ width: `${w}%`, background: 'var(--bubble-ai-border, var(--page-border))' }} />
+          ))}
         </div>
-        <div className="px-3.5 py-3">
-          <p className="text-[10px] font-bold text-purple-400 uppercase tracking-wider mb-1.5">Summary</p>
-          {result === null ? (
-            <div className="space-y-2 animate-pulse">
-              {[100, 83, 66].map((w, i) => (
-                <div
-                  key={i}
-                  className="h-3 rounded"
-                  style={{ width: `${w}%`, background: 'var(--bubble-ai-border, var(--page-border))' }}
-                />
-              ))}
-            </div>
-          ) : (
-            <p
-              className="text-[13px] leading-relaxed font-medium whitespace-pre-wrap"
-              style={{ color: 'var(--bubble-ai-text, var(--page-text))' }}
-            >
-              {result}
-            </p>
-          )}
-        </div>
-      </div>
+      ) : (
+        <p className="text-sm leading-relaxed font-medium whitespace-pre-wrap" style={{ color: 'var(--page-text)' }}>
+          {result}
+        </p>
+      )}
     </div>
   </div>
 );
 
-// ── main component ────────────────────────────────────────────────────────────
+// ── Divider ───────────────────────────────────────────────────────────────────
+const TurnDivider = () => (
+  <div className="h-px w-full" style={{ background: 'var(--bubble-ai-border, var(--page-border))', opacity: 0.4 }} />
+);
+
+// ── Export chat to markdown ───────────────────────────────────────────────────
+const exportChat = (messages, documentName) => {
+  const lines = [`# Chat Export${documentName ? ` — ${documentName}` : ''}`, `_Exported ${new Date().toLocaleString()}_`, ''];
+  messages.forEach(msg => {
+    if (msg.role === 'user') {
+      lines.push(`**You:** ${msg.content}`, '');
+    } else if (msg.role === 'assistant') {
+      lines.push(`**Assistant:** ${msg.content}`, '');
+    } else if (msg.role === 'summary') {
+      lines.push(`**Summary of:** _${msg.selectedText}_`, '', msg.result || '', '');
+    }
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `chat-export-${Date.now()}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+// ── Main component ────────────────────────────────────────────────────────────
 const ChatPanel = ({
   documentId,
   documentName,
@@ -171,6 +302,8 @@ const ChatPanel = ({
   const [sessionId,   setSessionId]   = useState(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [error,       setError]       = useState('');
+  // thumbs state: { [messageId]: 'up' | 'down' }
+  const [thumbs,      setThumbs]      = useState({});
 
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
@@ -223,14 +356,16 @@ const ChatPanel = ({
     });
   }, []);
 
-  const sendMessage = async () => {
-    const q = input.trim();
+  const sendMessage = async (overrideQuestion) => {
+    const q = (overrideQuestion || input).trim();
     if (!q || isStreaming) return;
-    setInput('');
+    if (!overrideQuestion) setInput('');
     setError('');
 
     const now = Date.now();
-    setMessages(prev => [...prev, { role: 'user', content: q, id: now }]);
+    if (!overrideQuestion) {
+      setMessages(prev => [...prev, { role: 'user', content: q, id: now }]);
+    }
     setIsStreaming(true);
 
     abortRef.current?.abort();
@@ -271,13 +406,10 @@ const ChatPanel = ({
         for (const raw of lines) {
           const line = raw.trim();
           if (!line) { expectMetaData = false; continue; }
-
           if (line === 'event: meta') { expectMetaData = true; continue; }
-
           if (line.startsWith('data: ')) {
             const payload = line.slice(6);
             if (payload === '[DONE]') { finaliseAssistant(); expectMetaData = false; continue; }
-
             if (expectMetaData) {
               try {
                 const meta = JSON.parse(payload);
@@ -286,7 +418,6 @@ const ChatPanel = ({
               expectMetaData = false;
               continue;
             }
-
             appendAssistantChunk(payload);
           }
         }
@@ -298,6 +429,50 @@ const ChatPanel = ({
     } finally {
       setIsStreaming(false);
     }
+  };
+
+  // ── Stop streaming ──────────────────────────────────────────────────────────
+  const stopStreaming = () => {
+    abortRef.current?.abort();
+    finaliseAssistant();
+    setIsStreaming(false);
+  };
+
+  // ── Regenerate last response ────────────────────────────────────────────────
+  const regenerate = () => {
+    if (isStreaming) return;
+    // Find the last user message
+    const lastUser = [...messages].reverse().find(m => m.role === 'user');
+    if (!lastUser) return;
+    // Remove the last assistant message
+    setMessages(prev => {
+      const lastAssistantIdx = [...prev].map((m, i) => ({ m, i })).reverse().find(({ m }) => m.role === 'assistant');
+      if (lastAssistantIdx) return prev.filter((_, i) => i !== lastAssistantIdx.i);
+      return prev;
+    });
+    sendMessage(lastUser.content);
+  };
+
+  // ── Copy handler ────────────────────────────────────────────────────────────
+  const handleCopy = (text) => {
+    navigator.clipboard.writeText(text).catch(() => {
+      // fallback
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    });
+  };
+
+  // ── Thumb handler ───────────────────────────────────────────────────────────
+  const handleThumb = (messageId, direction) => {
+    setThumbs(prev => ({
+      ...prev,
+      [messageId]: prev[messageId] === direction ? null : direction,
+    }));
+    // Optionally POST feedback to your API here
   };
 
   const handleKeyDown = (e) => {
@@ -319,6 +494,7 @@ const ChatPanel = ({
     setMessages([]);
     setSessionId(null);
     setError('');
+    setThumbs({});
   };
 
   return (
@@ -343,10 +519,7 @@ const ChatPanel = ({
         </div>
 
         <div className="flex-1 min-w-0">
-          <h2
-            className="text-sm font-bold leading-tight"
-            style={{ color: 'var(--page-text)' }}
-          >
+          <h2 className="text-sm font-bold leading-tight" style={{ color: 'var(--page-text)' }}>
             Ask about this document
           </h2>
           {documentName && (
@@ -356,23 +529,42 @@ const ChatPanel = ({
           )}
         </div>
 
-        {messages.length > 0 && (
-          <button
-            onClick={clearChat}
-            className="p-1.5 rounded-lg transition text-[10px] font-medium"
-            style={{ color: 'var(--muted-text)', background: 'transparent' }}
-            onMouseEnter={e => e.currentTarget.style.background = 'var(--page-border)'}
-            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-            title="Clear chat"
-          >
-            Clear
-          </button>
-        )}
+        {/* Header actions */}
+        <div className="flex items-center gap-1">
+          {messages.length > 0 && (
+            <>
+              {/* Export */}
+              <button
+                onClick={() => exportChat(messages, documentName)}
+                className="p-1.5 rounded-lg transition text-[10px] font-medium flex items-center gap-1"
+                style={{ color: 'var(--muted-text)', background: 'transparent' }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'var(--page-border)'; e.currentTarget.style.color = 'var(--page-text)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--muted-text)'; }}
+                title="Export chat as Markdown"
+              >
+                <ExportIcon />
+                <span className="hidden sm:inline">Export</span>
+              </button>
+
+              {/* Clear */}
+              <button
+                onClick={clearChat}
+                className="p-1.5 rounded-lg transition text-[10px] font-medium"
+                style={{ color: 'var(--muted-text)', background: 'transparent' }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'var(--page-border)'; e.currentTarget.style.color = 'var(--page-text)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--muted-text)'; }}
+                title="Clear chat"
+              >
+                Clear
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* ── Messages ── */}
       <div
-        className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 sm:py-4 space-y-3 sm:space-y-4"
+        className="flex-1 overflow-y-auto px-4 sm:px-5 py-4 sm:py-5 space-y-4"
         style={{ background: 'var(--chat-bg, var(--app-bg))', transition: 'background 0.3s' }}
       >
         {/* Empty state */}
@@ -418,60 +610,48 @@ const ChatPanel = ({
         )}
 
         {/* Message list */}
-        {messages.map((msg) => {
+        {messages.map((msg, idx) => {
+          const isFirst = idx === 0;
+          const prevMsg = messages[idx - 1];
+          const showDivider = !isFirst && prevMsg && prevMsg.role !== msg.role;
+
           if (msg.role === 'summary') {
-            return <SummaryCard key={msg.id} selectedText={msg.selectedText} result={msg.result} />;
+            return (
+              <React.Fragment key={msg.id}>
+                {showDivider && <TurnDivider />}
+                <SummaryCard selectedText={msg.selectedText} result={msg.result} />
+              </React.Fragment>
+            );
           }
 
           return (
-            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              {msg.role === 'assistant' && (
-                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shrink-0 mt-0.5 mr-2">
-                  <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
-                  </svg>
-                </div>
-              )}
-
-              {msg.role === 'assistant' ? (
-                <AssistantBubble content={msg.content} streaming={msg.streaming} />
-              ) : (
-                <div
-                  className="max-w-[82%] sm:max-w-[78%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed rounded-tr-sm"
-                  style={{
-                    background: 'var(--bubble-user-bg, #4f46e5)',
-                    color: 'var(--bubble-user-text, #ffffff)',
-                  }}
-                >
-                  {msg.content}
-                </div>
-              )}
-            </div>
+            <React.Fragment key={msg.id}>
+              {showDivider && <TurnDivider />}
+              {msg.role === 'user'
+                ? <UserMessage content={msg.content} />
+                : (
+                  <AssistantMessage
+                    content={msg.content}
+                    streaming={msg.streaming}
+                    onCopy={handleCopy}
+                    onThumb={(dir) => handleThumb(msg.id, dir)}
+                    onRegenerate={regenerate}
+                    thumbState={thumbs[msg.id]}
+                  />
+                )
+              }
+            </React.Fragment>
           );
         })}
 
         {/* Typing indicator */}
         {isStreaming && messages.length > 0 && messages[messages.length - 1].role === 'user' && (
-          <div className="flex justify-start">
-            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shrink-0 mt-0.5 mr-2">
-              <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
-              </svg>
-            </div>
-            <FakeTypingBubble />
-          </div>
+          <TypingIndicator />
         )}
 
         {/* Error */}
         {error && (
-          <div
-            className="flex items-start gap-2 px-3 py-2.5 rounded-xl text-xs"
-            style={{
-              background: 'var(--bubble-ai-bg, var(--page-bg))',
-              border: '1px solid var(--bubble-ai-border, var(--page-border))',
-              color: '#c0392b',
-            }}
-          >
+          <div className="flex items-start gap-2 text-xs" style={{ color: '#c0392b' }}>
             <svg className="w-4 h-4 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
@@ -523,19 +703,28 @@ const ChatPanel = ({
               e.target.style.height = `${Math.min(e.target.scrollHeight, maxTextareaHeight)}px`;
             }}
           />
-          <button
-            onClick={sendMessage}
-            disabled={!input.trim() || isStreaming}
-            className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center transition hover:opacity-90 active:opacity-80 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
-          >
-            {isStreaming ? (
-              <div className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-            ) : (
+
+          {/* Stop button (while streaming) */}
+          {isStreaming ? (
+            <button
+              onClick={stopStreaming}
+              title="Stop generating"
+              className="w-8 h-8 rounded-xl flex items-center justify-center transition hover:opacity-90 active:opacity-80 shrink-0"
+              style={{ background: 'var(--bubble-ai-border, var(--page-border))', color: 'var(--page-text)' }}
+            >
+              <StopIcon />
+            </button>
+          ) : (
+            <button
+              onClick={() => sendMessage()}
+              disabled={!input.trim()}
+              className="w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center transition hover:opacity-90 active:opacity-80 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+            >
               <svg className="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 12h14M12 5l7 7-7 7" />
               </svg>
-            )}
-          </button>
+            </button>
+          )}
         </div>
 
         <p className="hidden sm:block text-[10px] text-center mt-2" style={{ color: 'var(--muted-text)' }}>
@@ -543,7 +732,6 @@ const ChatPanel = ({
         </p>
       </div>
 
-      {/* ── Placeholder color for themed textarea ── */}
       <style>{`
         .chat-panel textarea::placeholder {
           color: var(--muted-text);

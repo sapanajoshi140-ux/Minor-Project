@@ -13,6 +13,7 @@
     "@react-oauth/google": "^0.13.4",
     "@tailwindcss/vite": "^4.1.18",
     "chart.js": "^4.5.1",
+    "chartjs-plugin-datalabels": "^2.2.0",
     "framer-motion": "^12.24.12",
     "lucide-react": "^0.562.0",
     "pdfjs-dist": "^3.4.120",

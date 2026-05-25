@@ -40,7 +40,6 @@ export function AuthProvider({ children }) {
           setAccessToken(storedAccessToken);
           setRefreshToken(storedRefreshToken);
         } else if (response.status === 401 && storedRefreshToken) {
-          // Try to refresh
           const refreshed = await attemptTokenRefresh(storedRefreshToken);
           if (!refreshed) clearTokens();
         } else {
@@ -61,7 +60,8 @@ export function AuthProvider({ children }) {
     try {
       const response = await fetch(`${API_URL}/refresh`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${storedRefreshToken}` },
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: storedRefreshToken }),
       });
 
       if (!response.ok) return false;
@@ -77,13 +77,14 @@ export function AuthProvider({ children }) {
         setUser(await userResponse.json());
       }
       return true;
-    } catch {
+    } catch (err) {
+      console.error('Token refresh failed:', err);
       return false;
     }
   };
 
-  // Google Login
   const googleLogin = async (googleAccessToken) => {
+    clearTokens();
     try {
       const response = await fetch(`${API_URL}/google-login`, {
         method: 'POST',
@@ -110,8 +111,8 @@ export function AuthProvider({ children }) {
     }
   };
 
-  // Regular Login
   const login = async (email, password) => {
+    clearTokens();
     try {
       const response = await fetch(`${API_URL}/login`, {
         method: 'POST',
@@ -138,7 +139,6 @@ export function AuthProvider({ children }) {
     }
   };
 
-  // Signup
   const signup = async (fullName, email, password, confirmPassword) => {
     try {
       const response = await fetch(`${API_URL}/signup`, {
@@ -161,7 +161,6 @@ export function AuthProvider({ children }) {
     }
   };
 
-  // Resend Verification
   const resendVerification = async (email) => {
     try {
       const response = await fetch(`${API_URL}/resend-verification`, {
@@ -179,7 +178,6 @@ export function AuthProvider({ children }) {
     }
   };
 
-  // Forgot Password
   const forgotPassword = async (email) => {
     try {
       const response = await fetch(`${API_URL}/forgot-password`, {
@@ -197,27 +195,26 @@ export function AuthProvider({ children }) {
     }
   };
 
-  // Logout — calls backend to revoke token, then clears local state
   const logout = async () => {
-  try {
-    const accessToken = localStorage.getItem('access_token');
-    const refreshToken = localStorage.getItem('refresh_token');
-    if (accessToken) {
-      await fetch(`${API_URL}/logout`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ refresh_token: refreshToken || '' }),
-      });
+    try {
+      const accessToken = localStorage.getItem('access_token');
+      const refreshToken = localStorage.getItem('refresh_token');
+      if (accessToken) {
+        await fetch(`${API_URL}/logout`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ refresh_token: refreshToken || '' }),
+        });
+      }
+    } catch (_) {
+      // always clear tokens regardless
+    } finally {
+      clearTokens();
     }
-  } catch (_) {
-    // always clear tokens regardless
-  } finally {
-    clearTokens();
-  }
-};
+  };
 
   const value = {
     user,

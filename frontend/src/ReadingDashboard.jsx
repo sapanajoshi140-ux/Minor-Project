@@ -812,7 +812,7 @@ const ReadingDashboard = ({
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
-        apiUrl={apiUrl}
+        apiUrl="http://localhost:8000"
         authHeaders={authHeaders}
         onAuthError={onAuthError}
         user={user}

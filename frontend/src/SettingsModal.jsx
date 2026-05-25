@@ -1,8 +1,6 @@
-
-
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  X, Lock, Eye, EyeOff, Check, Shield,
+  X, Lock, Eye, EyeOff, Check, Shield, Chrome,
 } from 'lucide-react';
 
 // ── tiny helpers ──────────────────────────────────────────────────────────────
@@ -71,29 +69,33 @@ const StrengthBar = ({ password }) => {
   );
 };
 
-// ── Password section ──────────────────────────────────────────────────────────
-const PasswordSection = ({ apiUrl, authHeaders, onAuthError }) => {
-  const [current,  setCurrent]  = useState('');
-  const [next,     setNext]     = useState('');
-  const [confirm,  setConfirm]  = useState('');
-  const [status,   setStatus]   = useState('idle'); // idle | loading | success | error
-  const [errMsg,   setErrMsg]   = useState('');
+// ── Change Password (email/password users) ────────────────────────────────────
+const ChangePasswordForm = ({ apiUrl, authHeaders, onAuthError }) => {
+  const [current, setCurrent] = useState('');
+  const [next,    setNext]    = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [status,  setStatus]  = useState('idle');
+  const [errMsg,  setErrMsg]  = useState('');
 
   const reset = () => { setCurrent(''); setNext(''); setConfirm(''); setStatus('idle'); setErrMsg(''); };
 
   const handleSubmit = async () => {
     setErrMsg('');
-    if (!current)              return setErrMsg('Please enter your current password.');
-    if (next.length < 8)       return setErrMsg('New password must be at least 8 characters.');
-    if (next !== confirm)      return setErrMsg('New passwords do not match.');
-    if (next === current)      return setErrMsg('New password must differ from current.');
+    if (!current)         return setErrMsg('Please enter your current password.');
+    if (next.length < 8)  return setErrMsg('New password must be at least 8 characters.');
+    if (next !== confirm)  return setErrMsg('New passwords do not match.');
+    if (next === current)  return setErrMsg('New password must differ from current.');
 
     setStatus('loading');
     try {
-      const res = await fetch(`${apiUrl}/me/change-password`, {
+      const res = await fetch(`${apiUrl}/change-password`, {
         method: 'POST',
         headers: { ...authHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ current_password: current, new_password: next }),
+        body: JSON.stringify({
+          current_password:     current,
+          new_password:         next,
+          confirm_new_password: confirm,
+        }),
       });
       if (res.status === 401) { onAuthError(); return; }
       if (!res.ok) {
@@ -108,6 +110,123 @@ const PasswordSection = ({ apiUrl, authHeaders, onAuthError }) => {
     }
   };
 
+  if (status === 'success') return <SuccessBanner label="Password changed!" />;
+
+  return (
+    <div className="space-y-3">
+      <PasswordInput id="current-pw" label="Current password"    value={current} onChange={setCurrent} placeholder="Enter current password" />
+      <PasswordInput id="new-pw"     label="New password"         value={next}    onChange={setNext}    placeholder="Min. 8 characters" />
+      <StrengthBar password={next} />
+      <PasswordInput id="confirm-pw" label="Confirm new password" value={confirm} onChange={setConfirm} placeholder="Repeat new password" />
+      <ErrorMsg msg={errMsg} />
+      <SubmitButton loading={status === 'loading'} onClick={handleSubmit} label="Change Password" />
+    </div>
+  );
+};
+
+// ── Create Password (OAuth-only users) ───────────────────────────────────────
+const CreatePasswordForm = ({ apiUrl, authHeaders, onAuthError, onPasswordCreated }) => {
+  const [next,    setNext]    = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [status,  setStatus]  = useState('idle');
+  const [errMsg,  setErrMsg]  = useState('');
+
+  const reset = () => { setNext(''); setConfirm(''); setStatus('idle'); setErrMsg(''); };
+
+  const handleSubmit = async () => {
+    setErrMsg('');
+    if (next.length < 8)  return setErrMsg('Password must be at least 8 characters.');
+    if (next !== confirm)  return setErrMsg('Passwords do not match.');
+
+    setStatus('loading');
+    try {
+      const res = await fetch(`${apiUrl}/create-password`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          new_password:         next,
+          confirm_new_password: confirm,
+        }),
+      });
+      if (res.status === 401) { onAuthError(); return; }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || 'Failed to create password.');
+      }
+      setStatus('success');
+      // Notify parent so it can flip user.has_password → true
+      setTimeout(() => { reset(); onPasswordCreated?.(); }, 3000);
+    } catch (err) {
+      setErrMsg(err.message);
+      setStatus('error');
+    }
+  };
+
+  if (status === 'success') return <SuccessBanner label="Password created! You can now log in with email too." />;
+
+  return (
+    <div className="space-y-3">
+      {/* Info banner explaining why there's no "current password" field */}
+      <div className="flex gap-2.5 px-3 py-2.5 rounded-xl border bg-blue-500/8 border-blue-500/20">
+        <Chrome className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
+        <p className="text-xs text-blue-300/80 leading-relaxed">
+          You signed in with Google. Create a password to also log in with your email and password.
+        </p>
+      </div>
+
+      <PasswordInput id="new-pw"     label="New password"         value={next}    onChange={setNext}    placeholder="Min. 8 characters" />
+      <StrengthBar password={next} />
+      <PasswordInput id="confirm-pw" label="Confirm password"     value={confirm} onChange={setConfirm} placeholder="Repeat new password" />
+      <ErrorMsg msg={errMsg} />
+      <SubmitButton loading={status === 'loading'} onClick={handleSubmit} label="Create Password" />
+    </div>
+  );
+};
+
+// ── Shared micro-components ───────────────────────────────────────────────────
+const SuccessBanner = ({ label }) => (
+  <div className="flex flex-col items-center justify-center py-8 rounded-2xl border text-center gap-3 bg-green-500/8 border-green-500/25">
+    <div className="w-12 h-12 rounded-full flex items-center justify-center bg-green-500/15">
+      <Check className="w-6 h-6 text-green-400" />
+    </div>
+    <div>
+      <p className="text-sm font-semibold text-green-400">{label}</p>
+      <p className="text-xs mt-0.5 text-white/40">Form will reset shortly.</p>
+    </div>
+  </div>
+);
+
+const ErrorMsg = ({ msg }) =>
+  msg ? (
+    <p className="text-xs px-3 py-2 rounded-lg border text-red-400 bg-red-500/8 border-red-500/20">
+      {msg}
+    </p>
+  ) : null;
+
+const SubmitButton = ({ loading, onClick, label }) => (
+  <button
+    onClick={onClick}
+    disabled={loading}
+    className="w-full py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50 flex items-center justify-center gap-2 bg-blue-500 text-white hover:bg-blue-600"
+  >
+    {loading ? (
+      <>
+        <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+        Please wait…
+      </>
+    ) : (
+      <>
+        <Lock className="w-3.5 h-3.5" />
+        {label}
+      </>
+    )}
+  </button>
+);
+
+// ── Password section — picks the right form based on has_password ─────────────
+const PasswordSection = ({ apiUrl, authHeaders, onAuthError, user, onPasswordCreated }) => {
+  const hasPassword = user?.has_password;
+
   return (
     <div>
       <div className="flex items-center gap-2 mb-4">
@@ -115,52 +234,28 @@ const PasswordSection = ({ apiUrl, authHeaders, onAuthError }) => {
           <Shield className="w-4 h-4 text-red-400" />
         </div>
         <div>
-          <p className="text-sm font-semibold text-white">Change Password</p>
-          <p className="text-[11px] text-white/40">Update your account password</p>
+          <p className="text-sm font-semibold text-white">
+            {hasPassword ? 'Change Password' : 'Create Password'}
+          </p>
+          <p className="text-[11px] text-white/40">
+            {hasPassword ? 'Update your account password' : 'Add a password to your Google account'}
+          </p>
         </div>
       </div>
 
-      {status === 'success' ? (
-        <div className="flex flex-col items-center justify-center py-8 rounded-2xl border text-center gap-3 bg-green-500/8 border-green-500/25">
-          <div className="w-12 h-12 rounded-full flex items-center justify-center bg-green-500/15">
-            <Check className="w-6 h-6 text-green-400" />
-          </div>
-          <div>
-            <p className="text-sm font-semibold text-green-400">Password changed!</p>
-            <p className="text-xs mt-0.5 text-white/40">You're all set. Form will reset shortly.</p>
-          </div>
-        </div>
+      {hasPassword ? (
+        <ChangePasswordForm
+          apiUrl={apiUrl}
+          authHeaders={authHeaders}
+          onAuthError={onAuthError}
+        />
       ) : (
-        <div className="space-y-3">
-          <PasswordInput id="current-pw"  label="Current password"      value={current} onChange={setCurrent} placeholder="Enter current password" />
-          <PasswordInput id="new-pw"      label="New password"           value={next}    onChange={setNext}    placeholder="Min. 8 characters" />
-          <StrengthBar password={next} />
-          <PasswordInput id="confirm-pw"  label="Confirm new password"   value={confirm} onChange={setConfirm} placeholder="Repeat new password" />
-
-          {errMsg && (
-            <p className="text-xs px-3 py-2 rounded-lg border text-red-400 bg-red-500/8 border-red-500/20">
-              {errMsg}
-            </p>
-          )}
-
-          <button
-            onClick={handleSubmit}
-            disabled={status === 'loading'}
-            className="w-full py-2.5 rounded-xl text-sm font-semibold transition disabled:opacity-50 flex items-center justify-center gap-2 bg-blue-500 text-white hover:bg-blue-600"
-          >
-            {status === 'loading' ? (
-              <>
-                <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Changing…
-              </>
-            ) : (
-              <>
-                <Lock className="w-3.5 h-3.5" />
-                Change Password
-              </>
-            )}
-          </button>
-        </div>
+        <CreatePasswordForm
+          apiUrl={apiUrl}
+          authHeaders={authHeaders}
+          onAuthError={onAuthError}
+          onPasswordCreated={onPasswordCreated}
+        />
       )}
     </div>
   );
@@ -174,10 +269,10 @@ const SettingsModal = ({
   authHeaders = {},
   onAuthError = () => {},
   user = null,
+  onPasswordCreated = null, // () => void — called after OAuth user sets a password
 }) => {
   const overlayRef = useRef(null);
 
-  // close on Escape
   useEffect(() => {
     if (!isOpen) return;
     const handler = (e) => { if (e.key === 'Escape') onClose(); };
@@ -194,7 +289,7 @@ const SettingsModal = ({
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
     >
       <div className="w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden flex flex-col bg-neutral-900 border border-white/10 max-h-[90vh]">
-        {/* ── Header ── */}
+        {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 flex-shrink-0 border-b border-white/10">
           <div>
             <h2 className="text-lg font-bold text-white">Settings</h2>
@@ -210,12 +305,14 @@ const SettingsModal = ({
           </button>
         </div>
 
-        {/* ── Content (Security only) ── */}
+        {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 py-5">
           <PasswordSection
             apiUrl={apiUrl}
             authHeaders={authHeaders}
             onAuthError={onAuthError}
+            user={user}
+            onPasswordCreated={onPasswordCreated}
           />
         </div>
       </div>

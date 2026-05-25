@@ -106,7 +106,7 @@ DASHBOARD_VOCAB_LIMIT       = _int("DASHBOARD_VOCAB_LIMIT",       7)
 
 # ── RAG / Ollama ──────────────────────────────────────────────────────────────
 OLLAMA_BASE_URL    = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-LLM_MODEL          = os.getenv("LLM_MODEL",       "llama3")
+LLM_MODEL          = os.getenv("LLM_MODEL",       "qwen3.5:4b")
 CONTEXT_WINDOW     = _int("CONTEXT_WINDOW",     4096)
 LLM_TIMEOUT        = _int("LLM_TIMEOUT",        120)
 RAG_SERVICE_URL    = os.getenv("RAG_SERVICE_URL", "")

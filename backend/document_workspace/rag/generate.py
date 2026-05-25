@@ -68,6 +68,8 @@ SYSTEM_PROMPT = """RULES
 Use ONLY the provided document context
 NO external knowledge or assumptions
 NO hallucination
+Provided response should be in nice formatting with line breaks , paragraph breaks . 
+Dont start reaponse with anything .Just give pure answers
 If info not found →
 "The document does not contain this information."
 

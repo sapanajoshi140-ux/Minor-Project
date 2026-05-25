@@ -132,7 +132,9 @@ def _render_slide_to_pil(pptx_path: str, slide_index: int) -> Optional[object]:
         return None
 
 
-# ── OCR for image slide ───────────────────────────────────────────────────────def _ocr_slide(pptx_path: str, slide_index: int) -> Optional[dict]:
+# ── OCR for image slide ───────────────────────────────────────────────────────
+
+def _ocr_slide(pptx_path: str, slide_index: int) -> Optional[dict]:
     """
     Render and OCR a single image-only slide via Tesseract (with TrOCR fallback
     when Tesseract confidence is below threshold).

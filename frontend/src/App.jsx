@@ -27,7 +27,7 @@ const LandingPage = () => {
   useEffect(() => {
     const url = new URL(window.location.href);
     if (url.searchParams.has('auth') || url.searchParams.has('showLogin')) {
-      // Remove query params without adding to history
+     
       const newUrl = new URL(window.location.href);
       newUrl.searchParams.delete('auth');
       newUrl.searchParams.delete('showLogin');
@@ -58,7 +58,7 @@ const ProtectedRoute = ({ children }) => {
     );
   }
 
-  // Store the attempted location and redirect to home if not authenticated
+  
   if (!isAuthenticated) {
     return <Navigate to="/" state={{ from: location }} replace />;
   }

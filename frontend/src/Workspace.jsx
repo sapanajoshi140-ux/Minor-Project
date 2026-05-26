@@ -941,7 +941,7 @@ const Workspace = ({
           style={{
             left: `${Math.min(meaningPopup.x, window.innerWidth - 150)}px`,
             top: `${meaningPopup.y}px`,
-            transform: 'translateX(-50%) translateY(-100%) translateY(-12px)',
+            transform: 'translateX(-50%) translateY(12px)',
             background: 'var(--page-bg)',
             borderColor: 'var(--page-border)',
           }}

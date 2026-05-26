@@ -134,19 +134,35 @@ const useAnimatedPlaceholder = (active) => {
 };
 
 // ── User message ──────────────────────────────────────────────────────────────
-const UserMessage = ({ content }) => (
-  <div className="flex justify-end">
-    <div
-      className="font-Inter font-semibold max-w-[82%] sm:max-w-[78%] px-3.5 py-2.5 rounded-2xl rounded-tr-sm text-[13px] leading-relaxed"
-      style={{
-        background: 'var(--bubble-user-bg, #4f46e5)',
-        color: 'var(--bubble-user-text, #ffffff)',
-      }}
-    >
-      {content}
+const UserMessage = ({ content, onCopy }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    onCopy?.(content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <div className="flex justify-end items-end gap-1 group">
+      <div
+        className="opacity-0 group-hover:opacity-100 transition-opacity duration-150"
+      >
+        <ActionBtn onClick={handleCopy} title={copied ? 'Copied!' : 'Copy'} active={copied} activeColor="#22c55e">
+          {copied ? <CheckIcon /> : <CopyIcon />}
+        </ActionBtn>
+      </div>
+      <div
+        className="font-Inter font-semibold max-w-[82%] sm:max-w-[78%] px-3.5 py-2.5 rounded-2xl rounded-tr-sm text-[13px] leading-relaxed"
+        style={{
+          background: 'var(--bubble-user-bg, #4f46e5)',
+          color: 'var(--bubble-user-text, #ffffff)',
+        }}
+      >
+        {content}
+      </div>
     </div>
-  </div>
-);
+  );
+
+};
 
 // ── Assistant message with action bar ────────────────────────────────────────
 const AssistantMessage = ({ content, streaming, onCopy, onThumb, onRegenerate, thumbState }) => {
@@ -160,12 +176,7 @@ const AssistantMessage = ({ content, streaming, onCopy, onThumb, onRegenerate, t
 
   return (
     <div className="flex flex-col gap-0.5 group">
-      <span
-        className="text-[15px] font-bold uppercase tracking-wider"
-        style={{ color: 'var(--muted-text)' }}
-      >
-        Assistant
-      </span>
+      
       <p
         className="text-[14px] leading-relaxed font-Inter font-semibold"
         style={{ color: 'var(--page-text)' }}
@@ -235,30 +246,54 @@ const TypingIndicator = () => (
 );
 
 // ── Summary card ──────────────────────────────────────────────────────────────
-const SummaryCard = ({ selectedText, result }) => (
-  <div className="flex flex-col gap-2 py-1">
-    <div className="pl-3 border-l-2" style={{ borderColor: 'rgba(139,92,246,0.5)' }}>
-      <p className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider mb-0.5">Selected text</p>
-      <p className="text-[12px] italic leading-relaxed line-clamp-3" style={{ color: 'var(--muted-text)' }}>
-        "{selectedText}"
-      </p>
-    </div>
-    <div>
-      <p className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider mb-1">✨ Summary</p>
-      {result === null ? (
-        <div className="space-y-2 animate-pulse">
-          {[100, 83, 66].map((w, i) => (
-            <div key={i} className="h-3 rounded" style={{ width: `${w}%`, background: 'var(--bubble-ai-border, var(--page-border))' }} />
-          ))}
-        </div>
-      ) : (
-        <p className="text-sm leading-relaxed font-medium whitespace-pre-wrap" style={{ color: 'var(--page-text)' }}>
-          {result}
+const SummaryCard = ({ selectedText, result, onCopy, onThumb, onRegenerate, thumbState }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    onCopy?.(result);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  return (
+    <div className="flex flex-col gap-2 py-1">
+      <div className="pl-3 border-l-2" style={{ borderColor: 'rgba(139,92,246,0.5)' }}>
+        <p className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider mb-0.5">Selected text</p>
+        <p className="text-[12px] italic leading-relaxed line-clamp-3" style={{ color: 'var(--muted-text)' }}>
+          "{selectedText}"
         </p>
-      )}
+      </div>
+      <div>
+        <p className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider mb-1">✨ Summary</p>
+        {result === null ? (
+          <div className="space-y-2 animate-pulse">
+            {[100, 83, 66].map((w, i) => (
+              <div key={i} className="h-3 rounded" style={{ width: `${w}%`, background: 'var(--bubble-ai-border, var(--page-border))' }} />
+            ))}
+          </div>
+        ) : (
+          <>
+            <p className="text-sm leading-relaxed font-medium whitespace-pre-wrap" style={{ color: 'var(--page-text)' }}>
+              {result}
+            </p>
+            <div className="flex items-center gap-0.5 mt-1.5">
+              <ActionBtn onClick={handleCopy} title={copied ? 'Copied!' : 'Copy'} active={copied} activeColor="#22c55e">
+                {copied ? <CheckIcon /> : <CopyIcon />}
+              </ActionBtn>
+              <ActionBtn onClick={() => onThumb?.('up')} title="Good summary" active={thumbState === 'up'} activeColor="#22c55e">
+                <ThumbUpIcon />
+              </ActionBtn>
+              <ActionBtn onClick={() => onThumb?.('down')} title="Bad summary" active={thumbState === 'down'} activeColor="#ef4444">
+                <ThumbDownIcon />
+              </ActionBtn>
+              <ActionBtn onClick={onRegenerate} title="Regenerate summary">
+                <RegenerateIcon />
+              </ActionBtn>
+            </div>
+          </>
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 // ── Divider ───────────────────────────────────────────────────────────────────
 const TurnDivider = () => (
@@ -520,7 +555,7 @@ const ChatPanel = ({
 
         <div className="flex-1 min-w-0">
           <h2 className="text-sm font-bold leading-tight" style={{ color: 'var(--page-text)' }}>
-            Ask about this document
+           Bounty AI - Ask anything related to this Document
           </h2>
           {documentName && (
             <p className="text-[10px] truncate" style={{ color: 'var(--muted-text)' }}>
@@ -619,7 +654,19 @@ const ChatPanel = ({
             return (
               <React.Fragment key={msg.id}>
                 {showDivider && <TurnDivider />}
-                <SummaryCard selectedText={msg.selectedText} result={msg.result} />
+               <SummaryCard
+  selectedText={msg.selectedText}
+  result={msg.result}
+  onCopy={handleCopy}
+  onThumb={(dir) => handleThumb(msg.id, dir)}
+  onRegenerate={() => {
+    setMessages(prev => prev.map(m =>
+      m.id === msg.id ? { ...m, result: null } : m
+    ));
+    onInjectedMessageConsumed?.({ id: msg.id, selectedText: msg.selectedText });
+  }}
+  thumbState={thumbs[msg.id]}
+/>
               </React.Fragment>
             );
           }

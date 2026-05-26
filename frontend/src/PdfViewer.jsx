@@ -7,109 +7,223 @@ import { CenteredNoteButton, FloatingNotePanel } from './NoteSection';
 const PDFJS_VERSION = '3.4.120';
 const PDFJS_CDN = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}`;
 
-// ── Text layer: line-grouped spans with non-overlapping vertical bounds ─────
+// ── Off-screen canvas for measuring natural text widths (avoids DOM thrash) ──
+let _measureCanvas = null;
+const getMeasureCtx = () => {
+  if (!_measureCanvas) {
+    _measureCanvas = document.createElement('canvas');
+    _measureCanvas.width  = 1;
+    _measureCanvas.height = 1;
+  }
+  return _measureCanvas.getContext('2d');
+};
+
+const measureTextWidth = (str, fontHeight) => {
+  const ctx = getMeasureCtx();
+  ctx.font = `${fontHeight}px sans-serif`;
+  return ctx.measureText(str).width || 1;
+};
+
+// ── CSS injected once: selection highlight + span base styles ─────────────────
+let _cssInjected = false;
+const injectTextLayerCSS = () => {
+  if (_cssInjected) return;
+  _cssInjected = true;
+  const style = document.createElement('style');
+  style.textContent = `
+    /* Isolate stacking context so canvas repaints never pierce the text layer */
+    .pdf-text-layer {
+      isolation: isolate;
+    }
+
+    /* Base span: invisible text positioned over the canvas glyph */
+    .pdf-text-layer span {
+      position:                absolute;
+      color:                   transparent;
+      -webkit-text-fill-color: transparent;
+      white-space:             pre;
+      cursor:                  text;
+      user-select:             text;
+      -webkit-user-select:     text;
+      pointer-events:          auto;
+      transform-origin:        0% 100%; /* scale from bottom-left (baseline) */
+      line-height:             1;
+      /* overflow:visible so scaleX never clips characters */
+      overflow:                visible;
+    }
+
+    /* Selection highlight — semi-transparent blue, text stays transparent */
+    .pdf-text-layer span::selection {
+      background:              rgba(59, 130, 246, 0.30);
+      color:                   transparent;
+      -webkit-text-fill-color: transparent;
+    }
+    .pdf-text-layer span::-moz-selection {
+      background:              rgba(59, 130, 246, 0.30);
+      color:                   transparent;
+    }
+  `;
+  document.head.appendChild(style);
+};
+
+// ── renderTextLayer ───────────────────────────────────────────────────────────
 //
-// THE CORE PROBLEM with fixed height/top:
-//   Every span gets top = baselineY - (fontHeight * ascenderRatio) and
-//   height = fontHeight. But line-spacing in PDFs is usually 120-140% of
-//   fontHeight, so the span's bottom (baseline + descender) overlaps the
-//   whitespace above the NEXT line's span top. When the cursor enters that
-//   overlap zone, the browser hits the wrong line's spans.
+// Design goals (vs the previous version):
 //
-// FIX — compute height from actual line spacing:
-//   1. Parse all items, compute their baseline Y.
-//   2. Group items that share the same baseline (same line).
-//   3. Sort lines top-to-bottom.
-//   4. Each line's span height = gap to the NEXT line's baseline (capped at
-//      fontHeight * 1.5 for the last line). This guarantees zero vertical
-//      overlap between lines — the spans tile perfectly with no gaps or overlaps.
+//  A. PIXEL-PERFECT WIDTH via scaleX
+//     Each span's natural browser-rendered width differs from the PDF's reported
+//     width due to font substitution, kerning, and character spacing. We measure
+//     the natural width with an off-screen canvas and apply CSS scaleX so the
+//     rendered span width exactly matches the PDF coordinate space.  This is the
+//     same technique used by Mozilla's official pdf.js viewer; it's the only
+//     reliable way to align character positions for drag-selection without
+//     re-implementing the font renderer.
+//
+//  B. ZERO INTER-LINE OVERLAP
+//     spanHeight = exact gap to next line's baseline.  Lines tile perfectly —
+//     no gaps, no overlaps.  Multi-line drag-select never skips a line.
+//
+//  C. TIGHTER BASELINE GROUPING (0.5 px tolerance)
+//     Round baseline to nearest 0.5 instead of 1.0.  Items with sub-pixel
+//     differences in their transform (e.g. bold + regular on the same line)
+//     now correctly land in the same group.
+//
+//  D. ACCURATE ASCENDER (0.75 em)
+//     Cap-height ≈ 75% of em for most Latin fonts.  Top of span is baseline
+//     minus 0.75 × fontHeight, leaving a small gap above letters so the cursor
+//     never accidentally selects the line above when hovering between lines.
+//
+//  E. ROTATION SUPPORT
+//     If the PDF transform includes a rotation component (tx[1] ≠ 0), the
+//     span gets a matching CSS rotate() + scaleX() transform so rotated
+//     text (stamps, watermarks, vertical labels) is still selectable.
+//
+//  F. TRAILING SPACE PRESERVATION
+//     item.str already contains trailing spaces in most PDFs.  white-space:pre
+//     preserves them so inter-word gaps are real DOM characters — dragging
+//     across a word boundary selects the space correctly.
 //
 const renderTextLayer = async (textLayer, page, viewport) => {
+  injectTextLayerCSS();
   textLayer.innerHTML = '';
-  const { items } = await page.getTextContent();
+
+  const { items } = await page.getTextContent({ includeMarkedContent: false });
+  if (!items.length) return;
+
   const fragment = document.createDocumentFragment();
 
-  // ── 1. Compute transformed data for every item ───────────────────────────
+  // ── 1. Parse every content item ──────────────────────────────────────────
   const parsed = [];
   for (const item of items) {
     if (!item.str) continue;
+
+    // Full 2-D affine transform in viewport (CSS pixel) space:
+    //   [a, b, c, d, e, f]  →  scaleX=a, skewY=b, skewX=c, scaleY=d, tx=e, ty=f
     const tx = window.pdfjsLib.Util.transform(viewport.transform, item.transform);
-    const fontHeight = Math.hypot(tx[0], tx[1]);
+
+    // Font height = magnitude of the y-column of the 2×2 sub-matrix
+    const fontHeight = Math.hypot(tx[2], tx[3]);
     if (fontHeight < 1) continue;
 
-    const baselineX  = tx[4];
-    const baselineY  = tx[5];
-    const pdfWidthPx = (item.width ?? 0) * viewport.scale;
-    const spanWidth  = pdfWidthPx > 2 ? pdfWidthPx : fontHeight * 0.5;
+    // Clockwise rotation angle (0 for ordinary horizontal text)
+    const angle = Math.atan2(tx[1], tx[0]);
 
-    parsed.push({ str: item.str, baselineX, baselineY, fontHeight, spanWidth });
+    // Baseline in CSS pixel coords
+    const baselineX = tx[4];
+    const baselineY = tx[5];
+
+    // PDF reports item.width in unscaled user units; multiply by viewport.scale
+    // to get the intended width in CSS pixels.
+    const pdfWidthPx = (item.width ?? 0) * viewport.scale;
+
+    parsed.push({ str: item.str, baselineX, baselineY, fontHeight, pdfWidthPx, angle });
   }
 
-  if (parsed.length === 0) return;
+  if (!parsed.length) return;
 
-  // ── 2. Group by baseline Y (round to 1 decimal to merge same-line items) ─
+  // ── 2. Group items by baseline Y (0.5 px tolerance) ─────────────────────
   const lineMap = new Map();
   for (const p of parsed) {
-    const key = Math.round(p.baselineY * 10) / 10;
+    // Round to nearest 0.5 so sub-pixel differences on the same visual line
+    // all collapse to the same key.
+    const key = Math.round(p.baselineY * 2) / 2;
     if (!lineMap.has(key)) lineMap.set(key, []);
     lineMap.get(key).push(p);
   }
 
-  // ── 3. Sort lines top→bottom (ascending Y in CSS coords) ─────────────────
+  // ── 3. Sort groups top → bottom ──────────────────────────────────────────
   const sortedBaselines = [...lineMap.keys()].sort((a, b) => a - b);
 
-  // ── 4. For each line, height = distance to next line's baseline ───────────
-  //       This makes spans tile perfectly — zero overlap, zero gap.
+  // ── 4. Emit a span per item with scaleX-corrected width ──────────────────
   for (let i = 0; i < sortedBaselines.length; i++) {
     const baseline     = sortedBaselines[i];
     const nextBaseline = sortedBaselines[i + 1];
     const lineItems    = lineMap.get(baseline);
 
-    // Representative font size for this line
+    // Representative font size for this line (tallest item)
     const fontHeight = lineItems.reduce((m, p) => Math.max(m, p.fontHeight), 0);
 
-    // Height: gap to next line, capped so we don't over-extend on last line
-    // or on lines with huge spacing (e.g. after headings).
-    // Minimum = fontHeight * 0.8 so short lines are still clickable.
+    // Ascender: top of span = baseline − 0.75 × fontHeight
+    // 0.75 matches cap-height in most Latin fonts; leaves a sliver of dead
+    // space above the letters so hovering between lines never misfires.
+    const ascender = fontHeight * 0.75;
+    const top      = baseline - ascender;
+
+    // spanHeight = exact gap to next baseline → zero overlap, zero gap.
+    // For the last line use ascender + descender (0.75 + 0.25 = 1.0 × font).
     let spanHeight;
     if (nextBaseline !== undefined) {
-      const gap = nextBaseline - baseline;
-      // clamp: at least 80% of fontHeight, at most 140% (ignore huge paragraph gaps)
-      spanHeight = Math.min(Math.max(gap, fontHeight * 0.8), fontHeight * 1.4);
+      spanHeight = nextBaseline - baseline;
+      // Safety floor: never shorter than half a fontHeight (still hittable)
+      if (spanHeight < fontHeight * 0.5) spanHeight = fontHeight * 0.5;
     } else {
-      spanHeight = fontHeight * 1.1; // last line: just cap + small descender
+      spanHeight = fontHeight; // last line: full em
     }
-
-    // Top of the span = baseline minus ascender (80% of fontHeight).
-    // Using 80% instead of 100% leaves a small gap above cap-height so
-    // moving the cursor above the line doesn't accidentally grab it.
-    const ascender = fontHeight * 0.80;
-    const top = baseline - ascender;
 
     for (const p of lineItems) {
       const span = document.createElement('span');
       span.textContent = p.str;
-      span.style.cssText = `
-        position:               absolute;
-        left:                   ${p.baselineX}px;
-        top:                    ${top}px;
-        width:                  ${p.spanWidth}px;
-        height:                 ${spanHeight}px;
-        font-size:              ${p.fontHeight}px;
-        font-family:            sans-serif;
-        line-height:            1;
-        white-space:            pre;
-        overflow:               hidden;
-        color:                  transparent;
-        -webkit-text-fill-color:transparent;
-        background:             transparent;
-        text-shadow:            none;
-        text-decoration:        none;
-        cursor:                 text;
-        user-select:            text;
-        -webkit-user-select:    text;
-        pointer-events:         auto;
-      `;
+
+      // ── scaleX: fit natural browser width to PDF-reported width ─────────
+      // We render at fontHeight px in sans-serif.  The browser's glyph metrics
+      // rarely match the PDF's exact advance widths.  CSS scaleX corrects this
+      // without re-measuring every character — a single canvas.measureText()
+      // per span is O(1) and costs < 1 μs.
+      let scaleX = 1;
+      if (p.pdfWidthPx > 2 && p.str.trim().length > 0) {
+        const naturalW = measureTextWidth(p.str, p.fontHeight);
+        if (naturalW > 0) scaleX = p.pdfWidthPx / naturalW;
+        // Clamp scaleX: never squish below 0.5× or stretch above 3× —
+        // extreme values usually mean the PDF width field is unreliable
+        // (e.g. zero-width spaces, ligature placeholders).
+        scaleX = Math.min(Math.max(scaleX, 0.5), 3.0);
+      }
+
+      // ── Build CSS transform ───────────────────────────────────────────────
+      // transform-origin is bottom-left (0% 100%) so scaleX expands rightward
+      // from the baseline start — matching how text is normally laid out.
+      let transform = '';
+      const isRotated = Math.abs(p.angle) > 0.005; // ~0.3°
+      if (isRotated) {
+        const deg = -(p.angle * 180) / Math.PI;
+        transform = scaleX !== 1
+          ? `rotate(${deg.toFixed(3)}deg) scaleX(${scaleX.toFixed(4)})`
+          : `rotate(${deg.toFixed(3)}deg)`;
+      } else if (scaleX !== 1) {
+        transform = `scaleX(${scaleX.toFixed(4)})`;
+      }
+
+      // ── Apply styles ──────────────────────────────────────────────────────
+      // Set properties individually (avoids cssText string re-parse on every span)
+      span.style.left      = `${p.baselineX}px`;
+      span.style.top       = `${top}px`;
+      span.style.fontSize  = `${p.fontHeight}px`;
+      span.style.height    = `${spanHeight}px`;
+      // Width: let the browser measure natural width, then scaleX fits it.
+      // Do NOT set an explicit width — that would clip overflow and break
+      // sub-pixel character hit-testing inside the span.
+      if (transform) span.style.transform = transform;
+
       fragment.appendChild(span);
     }
   }
@@ -159,13 +273,13 @@ const PdfPage = ({
     try {
       const page = await pdf.getPage(pageNum);
 
-      const dpr         = window.devicePixelRatio || 1;
-      const unscaled    = page.getViewport({ scale: 1 });
-      const cssScale    = containerWidth / unscaled.width;
+      const dpr      = window.devicePixelRatio || 1;
+      const unscaled = page.getViewport({ scale: 1 });
+      const cssScale = containerWidth / unscaled.width;
 
-      // Canvas renders at physical pixels (HiDPI sharp)
+      // Canvas: physical pixels (HiDPI sharp)
       const renderVP = page.getViewport({ scale: cssScale * dpr });
-      // Text layer uses CSS pixels (coordinates match layout)
+      // Text layer: CSS pixels (coords match layout)
       const cssVP    = page.getViewport({ scale: cssScale });
 
       canvas.width        = renderVP.width;

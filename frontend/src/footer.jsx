@@ -157,9 +157,9 @@ const SocialBtn = ({ label, icon: Icon }) => (
 
 const MinimalFooter = () => {
   const navData = [
-    { title: "Product", links: ["Features", "How It Works"] },
-    { title: "Company", links: ["About", "Blog", "Contact"] },
-    { title: "Legal", links: ["Privacy Policy", "Terms of Service"] },
+    { title: "Product", links: ["Features",] },
+    { title: "Company", links: ["About", "Contact"] },
+   
   ];
 
   const socials = [
@@ -174,7 +174,7 @@ const MinimalFooter = () => {
       <div className="max-w-[1200px] mx-auto px-6 md:px-12 pt-16 pb-12 flex flex-col md:flex-row flex-wrap gap-12 md:gap-16 items-center md:items-start">
         <div className="flex-1 min-w-[200px] max-w-[240px] text-center md:text-left group">
           <div className="flex items-center gap-3 mb-4 justify-center md:justify-start">
-            <img src="/logo.svg" alt="ReadWithEase Logo" className="size-8" />
+            <img src="/logo.png" alt="ReadWithEase Logo" className="size-8" />
 
             <span className="font-['Cormorant_Garamond'] text-[20px] font-semibold text-[#F5F0E8]">
               Read<span className="text-[#C9A84C]">With</span>Ease

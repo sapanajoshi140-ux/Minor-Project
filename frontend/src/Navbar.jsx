@@ -69,7 +69,7 @@ const Navbar = () => {
             whileHover={{ scale: 1.02 }}
             transition={{ duration: 0.3 }}
           >
-            <img src="/logo.svg" alt="ReadWithEase Logo" className="size-8" />
+            <img src="/logo.png" alt="ReadWithEase Logo" className="size-8" />
             <span className="font-['Cormorant_Garamond'] text-[20px] font-semibold text-[#F5F0E8]">
               Read<span className="text-[#C9A84C]">With</span>Ease
             </span>

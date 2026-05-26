@@ -10,11 +10,12 @@ import {
   CategoryScale, LinearScale, BarElement,
   Tooltip, Legend,
 } from 'chart.js';
+import ChartDataLabels from 'chartjs-plugin-datalabels';
 import { Bar } from 'react-chartjs-2';
 import UploadSection from './UploadSection.jsx';
 import SettingsModal from './SettingsModal';
 
-ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
+ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend, ChartDataLabels);
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmt = (bytes) => {
@@ -43,8 +44,19 @@ const last14Days = () => {
   return days;
 };
 
-const dayLabel = (iso) =>
-  new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const dayLabel = (iso, index, allDays) => {
+  const d = new Date(iso);
+  const today = new Date();
+  const isToday = d.toDateString() === today.toDateString();
+  if (isToday) return 'Today';
+  // show "May 13" on: first day, last day, or whenever month changes
+  const isFirst = index === 0;
+  const isLast  = index === allDays.length - 1;
+  const monthChanged = index > 0 && new Date(allDays[index - 1]).getMonth() !== d.getMonth();
+  if (isFirst || isLast || monthChanged)
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return String(d.getDate());
+};
 
 const catIcon = (cat) => (cat === 'text' ? '📄' : '🔍');
 
@@ -130,12 +142,10 @@ const ReadingGoalModal = ({ isOpen, onClose, currentGoal, onSave, isLoading }) =
 // ── Bottom nav items (mobile) ─────────────────────────────────────────────────
 const NAV_ITEMS = [
   { id: 'overview',   icon: LayoutDashboard, label: 'Overview'      },
-    { id: 'upload',     icon: Upload,          label: 'Upload'    },
-  
-  { id: 'documents',  icon: FileText,        label: 'My Documents' },
-
-  { id: 'vocabulary', icon: BookMarked,      label: 'My Vocabulary'     },
-  { id: 'history',    icon: Clock,           label: 'Reading History'   },
+  { id: 'upload',     icon: Upload,          label: 'Upload'        },
+  { id: 'documents',  icon: FileText,        label: 'My Documents'  },
+  { id: 'vocabulary', icon: BookMarked,      label: 'My Vocabulary' },
+  { id: 'history',    icon: Clock,           label: 'Reading History'},
 ];
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -445,7 +455,7 @@ const ReadingDashboard = ({
   const dayMap    = {};
   (dailyChart || []).forEach(d => { dayMap[d.date] = d.minutes; });
   const barData   = days.map(d => dayMap[d] || 0);
-  const barLabels = days.map(dayLabel);
+  const barLabels = days.map((d, i) => dayLabel(d, i, days));
 
   const totalMins  = stats?.total_time_read_minutes  ?? 0;
   const todayMins  = stats?.today_read_minutes       ?? 0;
@@ -467,6 +477,7 @@ const ReadingDashboard = ({
     d.filename?.toLowerCase().includes(docSearch.toLowerCase())
   );
 
+  // ── Bar chart config (FIXED) ──────────────────────────────────────────────
   const barChartData = {
     labels: barLabels,
     datasets: [{
@@ -485,16 +496,43 @@ const ReadingDashboard = ({
     maintainAspectRatio: false,
     plugins: {
       legend: { display: false },
-      tooltip: { callbacks: { label: c => ` ${c.parsed.y} min` } },
+      tooltip: {
+        callbacks: { label: c => ` ${c.parsed.y} min` },
+      },
+      datalabels: {
+        anchor: 'end',
+        align: 'end',
+        offset: 2,
+        formatter: (value) => value > 0 ? `${value}m` : '',
+        color: (ctx) =>
+          ctx.dataIndex === barData.length - 1
+            ? '#6ea8fe'
+            : 'rgba(255,255,255,0.45)',
+        font: { size: 9, weight: '500' },
+      },
+    },
+    layout: {
+      padding: { top: 18 },
     },
     scales: {
       x: {
-        ticks: { color: 'rgba(255,255,255,0.3)', font: { size: 9 }, maxRotation: 45, autoSkip: true, maxTicksLimit: 7 },
+        ticks: {
+          color: 'rgba(255,255,255,0.3)',
+          font: { size: 9 },
+          maxRotation: 0,
+          minRotation: 0,
+          autoSkip: false,   // show all 14 day labels
+        },
         grid: { display: false },
         border: { display: false },
       },
       y: {
-        ticks: { color: 'rgba(255,255,255,0.3)', font: { size: 10 }, callback: v => `${v}m` },
+        ticks: {
+          color: 'rgba(255,255,255,0.3)',
+          font: { size: 10 },
+          callback: v => `${v}m`,
+          maxTicksLimit: 5,
+        },
         grid: { color: 'rgba(255,255,255,0.07)' },
         border: { display: false },
         beginAtZero: true,
@@ -534,9 +572,11 @@ const ReadingDashboard = ({
     </div>
   );
 
+  // Updated skeleton height matches actual chart card height
   const ChartSkeleton = () => (
-    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 animate-pulse" style={{ height: 220 }}>
-      <div className="h-4 w-40 bg-white/10 rounded mb-6" />
+    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 animate-pulse" style={{ height: 268 }}>
+      <div className="h-4 w-40 bg-white/10 rounded mb-2" />
+      <div className="h-3 w-28 bg-white/10 rounded mb-6" />
       <div className="flex items-end gap-1.5 h-28">
         {[40,70,30,90,50,80,60,45,75,55,85,65,95,100].map((h,i) => (
           <div key={i} className="flex-1 bg-white/10 rounded-sm" style={{ height: `${h}%` }} />
@@ -549,10 +589,10 @@ const ReadingDashboard = ({
   const StatCards = () => (
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
       {[
-        { icon: Clock,    label: 'Total read',      value: fmtMins(totalMins), sub: 'All time' },
-        { icon: Target,   label: "Today",           value: fmtMins(todayMins), sub: `Goal: ${dailyGoal}m`, progress: todayPct },
-        { icon: BookOpen, label: 'Docs read',       value: docsRead,           sub: `${totalDocs} uploaded` },
-        { icon: Flame,    label: 'Streak',          value: `${streak}d`,       sub: `Best: ${bestStreak}d` },
+        { icon: Clock,    label: 'Total read',  value: fmtMins(totalMins), sub: 'All time' },
+        { icon: Target,   label: 'Today',       value: fmtMins(todayMins), sub: `Goal: ${dailyGoal}m`, progress: todayPct },
+        { icon: BookOpen, label: 'Docs read',   value: docsRead,           sub: `${totalDocs} uploaded` },
+        { icon: Flame,    label: 'Streak',      value: `${streak}d`,       sub: `Best: ${bestStreak}d` },
       ].map(({ icon: Icon, label, value, sub, progress }) => (
         <div key={label} className="bg-white/5 border border-white/10 rounded-2xl p-4">
           <div className="flex items-center gap-2 mb-3">
@@ -590,15 +630,25 @@ const ReadingDashboard = ({
   );
 
   // ── Doc button ────────────────────────────────────────────────────────────
+  // Uses a <div role="button"> as the outer row so delete <button>s inside are valid HTML
   const DocButton = ({ doc, query = '', compact = false }) => {
     const id = doc.id || doc.document_id;
+    const handleOpen = async () => {
+      const sessionId = await startReadingSession(id);
+      onOpenDocument({ ...doc, id, sessionId });
+    };
+    const handleDelete = (e) => {
+      e.stopPropagation();
+      setDeleteModal({ open: true, doc, deleting: false });
+      setDeleteError('');
+    };
     return (
-      <button
-        onClick={async () => {
-          const sessionId = await startReadingSession(id);
-          onOpenDocument({ ...doc, id, sessionId });
-        }}
-        className={`w-full flex items-center gap-3 rounded-xl hover:bg-white/5 active:bg-white/10 transition text-left group relative ${
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={handleOpen}
+        onKeyDown={(e) => e.key === 'Enter' && handleOpen()}
+        className={`w-full flex items-center gap-3 rounded-xl hover:bg-white/5 active:bg-white/10 transition text-left group relative cursor-pointer ${
           compact ? 'p-3' : 'p-4 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 rounded-2xl'
         }`}
       >
@@ -619,30 +669,23 @@ const ReadingDashboard = ({
           </p>
           <p className="text-[10px] text-white/25 mt-0.5 hidden sm:block">time spent</p>
         </div>
+        {/* Desktop delete — hover only */}
         <button
-          onClick={(e) => {
-            e.stopPropagation();
-            setDeleteModal({ open: true, doc, deleting: false });
-            setDeleteError('');
-          }}
+          onClick={handleDelete}
           className="opacity-0 group-hover:opacity-100 sm:flex hidden transition p-1.5 rounded-lg hover:bg-red-500/15 text-white/20 hover:text-red-400"
           title="Delete"
         >
           <Trash2 className="w-3.5 h-3.5" />
         </button>
-        {/* mobile delete: long-press not practical, show always on small screens */}
+        {/* Mobile delete — always visible */}
         <button
-          onClick={(e) => {
-            e.stopPropagation();
-            setDeleteModal({ open: true, doc, deleting: false });
-            setDeleteError('');
-          }}
+          onClick={handleDelete}
           className="flex sm:hidden p-1.5 rounded-lg text-white/15 active:text-red-400"
         >
           <Trash2 className="w-3.5 h-3.5" />
         </button>
         <ChevronRight className="w-4 h-4 text-white/20 hidden sm:block opacity-0 group-hover:opacity-100 transition" />
-      </button>
+      </div>
     );
   };
 
@@ -947,7 +990,10 @@ const ReadingDashboard = ({
                         <span className="text-[11px] text-white/30">Today</span>
                       </div>
                     </div>
-                    <div style={{ height: 160 }}><Bar data={barChartData} options={barChartOpts} /></div>
+                    {/* FIXED: increased height from 160 → 200 for breathing room */}
+                    <div style={{ height: 200 }}>
+                      <Bar data={barChartData} options={barChartOpts} />
+                    </div>
                   </div>
 
                   {/* Recent docs + vocab — stack on mobile */}
@@ -1183,7 +1229,10 @@ const ReadingDashboard = ({
                       <p className="text-[11px] text-white/30 mt-0.5">Last 14 days · minutes</p>
                     </div>
                   </div>
-                  <div style={{ height: 240 }}><Bar data={barChartData} options={barChartOpts} /></div>
+                  {/* FIXED: normalized height to 220 — consistent with overview, more readable */}
+                  <div style={{ height: 220 }}>
+                    <Bar data={barChartData} options={barChartOpts} />
+                  </div>
                 </div>
               )}
             </>

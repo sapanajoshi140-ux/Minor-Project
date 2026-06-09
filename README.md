@@ -1,4 +1,4 @@
-# 📚 READWITHEASE- A Document Intelligence Platform
+# 📚 READWITHEASE - A Document Intelligence Platform
 
 **A modern, AI-powered document management and analysis system with intelligent RAG-based Q&A, OCR support, and real-time collaboration features.**
 
@@ -6,9 +6,17 @@
 
 ## 📋 Overview
 
-The **Document Intelligence Platform** is a comprehensive 3rd-year academic project that combines modern web technologies with advanced AI/ML capabilities. It enables users to upload, process, and intelligently query documents through a conversational AI interface. The platform supports multiple document formats (PDF, DOCX, PPTX, images), processes them using advanced OCR and text extraction, and provides AI-driven insights through a Retrieval-Augmented Generation (RAG) pipeline powered by Ollama LLM.
+The **Document Intelligence Platform** is a comprehensive 3rd-year academic project that combines modern web technologies with advanced AI/ML capabilities. It enables users to upload, process, and intelligently analyze documents through a powerful RAG pipeline, OCR processing, and an intuitive interface.
 
-**Target Users:** 
+**Key Capabilities:**
+- 🔐 **Secure Authentication** - JWT tokens, OAuth 2.0 integration, email verification
+- 📄 **Multi-Format Support** - PDF, DOCX, PPTX, TXT, PNG, JPG with automatic conversion
+- 🤖 **AI Q&A** - Retrieval-Augmented Generation using Ollama LLM with streaming responses
+- 🔍 **Advanced OCR** - EasyOCR, TrOCR (handwritten), Tesseract with confidence scoring
+- 📊 **Analytics Dashboard** - Reading stats, word frequency, time tracking
+- 🎨 **Interactive PDF Viewer** - Built-in annotations, highlighting, note-taking
+
+**Target Users:**
 - Students and researchers analyzing academic papers
 - Professionals managing document-heavy workflows
 - Anyone seeking intelligent document insights without manual reading
@@ -88,7 +96,7 @@ The **Document Intelligence Platform** is a comprehensive 3rd-year academic proj
 
 ## 🛠️ Tech Stack
 
-### **Frontend**
+### **Frontend** (43.8% JavaScript)
 | Category | Technologies |
 |----------|--------------|
 | **Framework** | React 19.2.0, Vite 7.2.4 |
@@ -101,7 +109,7 @@ The **Document Intelligence Platform** is a comprehensive 3rd-year academic proj
 | **Auth** | @react-oauth/google 0.13.4 |
 | **Development** | ESLint 9.39.1, Vite 7.2.4 |
 
-### **Backend - Authentication Service**
+### **Backend - Authentication Service** (Python)
 | Category | Technologies |
 |----------|--------------|
 | **Framework** | FastAPI 0.128.0, Uvicorn 0.40.0 |
@@ -112,7 +120,7 @@ The **Document Intelligence Platform** is a comprehensive 3rd-year academic proj
 | **Email** | fastapi-mail 1.6.1, aiosmtplib 5.0.0 |
 | **Validation** | Pydantic 2.12.5 |
 
-### **Backend - Document & RAG Service**
+### **Backend - Document & RAG Service** (Python)
 | Category | Technologies |
 |----------|--------------|
 | **Framework** | FastAPI 0.128.0, Uvicorn 0.40.0 |
@@ -163,7 +171,7 @@ Minor-Project/
 │   │   │   ├── retrieve.py      # Hybrid search and chunk retrieval
 │   │   │   └── vector_db.py     # ChromaDB wrapper and Chunk dataclass
 │   │   ├── uploads/             # User-uploaded files (runtime)
-│   │   ├── download models.py   # Script to pre-download OCR models
+│   │   ├── download_models.py   # Script to pre-download OCR models
 │   │   └── requirement.txt      # Backend dependencies
 │   └── .gitignore
 ├── frontend/
@@ -288,7 +296,7 @@ cd backend/document_workspace
 pip install -r ../requirement.txt
 
 # Or manually install OCR models:
-# python download\ models.py  # Downloads EasyOCR, TrOCR models
+# python download_models.py  # Downloads EasyOCR, TrOCR models
 ```
 
 #### Configure Environment Variables
@@ -1004,16 +1012,6 @@ CREATE TABLE reading_sessions (
 );
 ```
 
-#### **reading_goals** table
-```sql
-CREATE TABLE reading_goals (
-  id INT PRIMARY KEY AUTO_INCREMENT,
-  user_id INT NOT NULL UNIQUE,
-  daily_goal_min INT DEFAULT 60,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-```
-
 #### **page_notes** table
 ```sql
 CREATE TABLE page_notes (
@@ -1023,776 +1021,23 @@ CREATE TABLE page_notes (
   page_number INT,
   note_text LONGTEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-);
-```
-
-#### **user_vocabulary** table
-```sql
-CREATE TABLE user_vocabulary (
-  id INT PRIMARY KEY AUTO_INCREMENT,
-  user_id INT NOT NULL,
-  word VARCHAR(255) NOT NULL,
-  document_id VARCHAR(36),
-  looked_up_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 ```
 
-#### **dictionary** table
+#### **user_preferences** table
 ```sql
-CREATE TABLE dictionary (
+CREATE TABLE user_preferences (
   id INT PRIMARY KEY AUTO_INCREMENT,
-  word VARCHAR(255) UNIQUE NOT NULL,
-  meaning LONGTEXT,
-  synonym VARCHAR(255),
-  phonetic VARCHAR(255),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  user_id INT UNIQUE NOT NULL,
+  theme VARCHAR(50) DEFAULT 'light',
+  daily_goal_min INT DEFAULT 60,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 ```
-
----
-
-## 🤖 AI/ML Features
-
-### **Document Ingestion Pipeline**
-
-```
-┌─────────────────────────────────────┐
-│   User Uploads Document             │
-│ (PDF, DOCX, PPTX, TXT, IMG)        │
-└──────────────┬──────────────────────┘
-               │
-       ┌───────▼────────┐
-       │ Is it Office?  │
-       ├────────────────┤
-       │ DOCX/PPTX/PPT  │◄──┐
-       └────────────────┘   │
-            │               │
-    ┌───────▼───────────────┘
-    │ Generate Searchable PDF
-    │ (python-pptx, python-docx)
-    └───────┬────────────────────────┐
-            │                        │
-    ┌───────▼────────┐    ┌─────────▼──┐
-    │ Is Image/PNG?  │    │ Text/PDF?  │
-    └────────────────┘    └────────────┘
-        │                      │
-    ┌───▼──────────────────────▼──────┐
-    │  Run OCR                        │
-    │ (EasyOCR, TrOCR, Tesseract)    │
-    └────────────┬────────────────────┘
-                 │
-          ┌──────▼──────────────┐
-          │ Extract Text        │
-          │ (PyMuPDF, TextLoader)
-          └──────┬───────────────┘
-                 │
-          ┌──────▼──────────────────────┐
-          │ Split into Chunks           │
-          │ (RecursiveCharacterSplitter)│
-          │ Chunk Size: 400 chars       │
-          │ Overlap: 80 chars           │
-          └──────┬─────────────────────┘
-                 │
-          ┌──────▼──────────────────────┐
-          │ Generate Embeddings         │
-          │ (Ollama nomic-embed-text)   │
-          │ Dim: 768                    │
-          └──────┬─────────────────────┘
-                 │
-          ┌──────▼──────────────────────┐
-          │ Store in ChromaDB           │
-          │ + Metadata (page, doc_id)   │
-          └──────────────────────────────┘
-```
-
-### **Query/Answer Generation Pipeline**
-
-```
-┌──────────────────────────┐
-│ User Question            │
-└────────┬─────────────────┘
-         │
-  ┌──────▼────────────────┐
-  │ Query → Embedding      │
-  │ (Ollama nomic-embed)   │
-  └──────┬─────────────────┘
-         │
-  ┌──────▼──────────────────────────┐
-  │ Hybrid Search                   │
-  │ • Semantic (vector similarity)   │
-  │ • Keyword (BM25)                │
-  │ Top-K: 5 chunks                 │
-  └──────┬───────────────────────────┘
-         │
-  ┌──────▼────────────────────────┐
-  │ Disambiguation Check            │
-  │ (Multi-topic handling)          │
-  │ Request clarification if needed │
-  └──────┬─────────────────────────┘
-         │
-  ┌──────▼─────────────────────────┐
-  │ Build Context + Citations       │
-  │ Format: [Source 1] (doc, page)  │
-  └──────┬──────────────────────────┘
-         │
-  ┌──────▼──────────────────────────┐
-  │ Send to LLM (Ollama llama3)      │
-  │ • System prompt + context       │
-  │ • Chat history (last 6 turns)   │
-  │ • Temperature: 0 (deterministic)│
-  │ • Context window: 4096 tokens   │
-  └──────┬──────────────────────────┘
-         │
-  ┌──────▼──────────────────────────┐
-  │ Stream Response                 │
-  │ (Server-Sent Events)            │
-  │ • Token-by-token delivery       │
-  │ • Real-time UI updates          │
-  └──────────────────────────────────┘
-```
-
-### **Summarization**
-
-```
-┌────────────────────────────┐
-│ Selected Text (from PDF)   │
-└────────┬───────────────────┘
-         │
-  ┌──────▼──────────────────┐
-  │ Summarization Request    │
-  │ Length: short/medium/long│
-  └──────┬──────────────────┘
-         │
-  ┌──────▼──────────────────┐
-  │ Send to Ollama llama3    │
-  │ • Summarization prompt  │
-  │ • Length instruction    │
-  │ • Streaming enabled     │
-  └──────┬──────────────────┘
-         │
-  ┌──────▼──────────────────┐
-  │ Stream Summary          │
-  │ (Real-time display)     │
-  └──────────────────────────┘
-```
-
-### **OCR & Text Extraction**
-
-| Document Type | Processing Method |
-|---|---|
-| **PDF** | PyMuPDF (fast, accurate) |
-| **DOCX/DOC** | python-docx → searchable PDF → PyMuPDF |
-| **PPTX/PPT** | python-pptx → searchable PDF → PyMuPDF |
-| **TXT** | Direct text loading |
-| **PNG/JPG/JPEG** | EasyOCR (primary) → TrOCR (handwritten) → Tesseract (fallback) |
-
-### **Smart Chunking**
-
-- **Chunk Size:** 400 characters (configurable)
-- **Overlap:** 80 characters (to maintain context)
-- **Metadata:** Page number, chunk position
-- **Splitter:** RecursiveCharacterTextSplitter (respects paragraph/sentence boundaries)
-
-### **Embedding & Vector Search**
-
-- **Model:** Ollama nomic-embed-text
-- **Dimensions:** 768
-- **Vector DB:** ChromaDB (in-memory or persistent)
-- **Search Types:**
-  - **Semantic:** Cosine similarity on embeddings
-  - **Keyword:** BM25-style full-text search
-  - **Hybrid:** Combination of both
-
-### **LLM Configuration**
-
-- **Model:** Ollama llama3 (or configurable via .env)
-- **Context Window:** 4096 tokens
-- **Temperature:** 0 (deterministic, no randomness)
-- **Timeout:** 120 seconds
-- **Streaming:** Enabled for real-time token delivery
-
-### **OCR Features**
-
-#### **EasyOCR**
-- Fast text extraction from images
-- Multi-language support
-- GPU acceleration capable
-- Confidence scoring
-
-#### **TrOCR (Handwritten OCR)**
-- Transformer-based handwritten text recognition
-- Specialized for cursive and handwriting
-- Uses Microsoft's TrOCR model
-- Better accuracy on historical documents
-
-#### **Tesseract OCR**
-- Fallback OCR engine
-- Multi-language support (100+ languages)
-- High accuracy for printed text
-- Legacy document support
-
----
-
-## 🔐 Authentication & Security
-
-### **Authentication Flow**
-
-```
-┌──────────────────────────────┐
-│ User/Frontend                │
-└──────────┬───────────────────┘
-           │
-    ┌──────▼────────────────────────┐
-    │ POST /login or /google-login  │
-    └──────┬─────────────────────────┘
-           │
-    ┌──────▼────────────────────────┐
-    │ Backend Validates Credentials │
-    │ • Email + bcrypt password     │
-    │ • Google token verification   │
-    │ • Check email verified flag   │
-    └──────┬─────────────────────────┘
-           │
-    ┌──────▼────────────────────────────┐
-    │ Generate JWT Tokens               │
-    │ • Access token (2h validity)      │
-    │ • Refresh token (7d validity)     │
-    │ • Include unique JTI per token    │
-    └──────┬─────────────────────────────┘
-           │
-    ┌──────▼──────────────────────────────┐
-    │ Return to Frontend                  │
-    │ • access_token → Authorization      │
-    │ • refresh_token → localStorage      │
-    └──────────────────────────────────────┘
-
-┌───────────────────────────────────────┐
-│ Protected Endpoint Request            │
-│ Authorization: Bearer <access_token>  │
-└──────────┬────────────────────────────┘
-           │
-    ┌──────▼──────────────────────────┐
-    │ Extract & Decode JWT            │
-    │ • Check signature (JWT_SECRET)  │
-    │ • Check expiration              │
-    │ • Check if revoked (blacklist)  │
-    └──────┬───────────────────────────┘
-           │
-    ┌──────▼────────────────────────┐
-    │ Grant/Deny Access             │
-    │ • Valid: Continue              │
-    │ • Invalid: Return 401          │
-    └────────────────────────────────┘
-```
-
-### **Security Features**
-
-| Feature | Implementation |
-|---------|-----------------|
-| **Password Hashing** | bcrypt with salt rounds |
-| **Password Strength** | Minimum 8 chars, 1 uppercase, 1 lowercase, 1 digit |
-| **Email Verification** | Token-based verification links (1h expiry) |
-| **Password Reset** | Time-limited reset tokens (30m expiry) |
-| **Token Blacklisting** | JTI-based logout (in revoked_tokens table) |
-| **Token Refresh** | Separate long-lived refresh tokens (7 days) |
-| **Rate Limiting** | slowapi (5 signup/min, 5 login/min, 3 password reset/hour) |
-| **CORS Protection** | Environment-based origin validation |
-| **JWT Validation** | Signature, expiry, and type checks |
-| **Automatic Cleanup** | APScheduler job removes expired tokens daily |
-| **Storage Quota** | Per-user storage limits (100 MB default) |
-
-### **Token Structure**
-
-```json
-{
-  "sub": "user@example.com",
-  "type": "access|refresh|email|reset",
-  "jti": "550e8400-e29b-41d4-a716-446655440000",
-  "exp": 1716546600,
-  "iat": 1716539400
-}
-```
-
----
-
-## 📄 File Processing Pipeline
-
-### **Complete Document Upload Workflow**
-
-```
-1. User selects file in frontend
-   │
-2. Frontend validates file type & size
-   │
-3. POST /upload (multipart/form-data)
-   │
-4. Backend stores file to disk (/uploads)
-   │
-5. File type detection
-   │
-   ├─ PDF → PyMuPDF extract
-   ├─ DOCX/PPTX → generate_searchable_pdf()
-   ├─ TXT → TextLoader
-   └─ PNG/JPG → Run OCR
-   │
-6. OCR Processing (for images/scans)
-   ├─ EasyOCR (primary, fast)
-   ├─ TrOCR (handwritten detection)
-   └─ Tesseract (fallback)
-   │
-7. Store extracted text in DocumentPage rows
-   │
-8. Trigger RAG ingestion
-   │
-9. Split into chunks (400 chars, 80 overlap)
-   │
-10. Generate embeddings (nomic-embed-text)
-   │
-11. Store in ChromaDB
-   │
-12. Return document metadata to frontend
-   │
-13. Frontend displays document in workspace
-```
-
-### **Supported File Types**
-
-| Extension | Processing | Notes |
-|-----------|-----------|-------|
-| **.pdf** | PyMuPDF | Native support, fast |
-| **.docx** | → searchable PDF | Converts to PDF first |
-| **.doc** | → searchable PDF | Converts to PDF first |
-| **.pptx** | → searchable PDF | Converts to PDF first |
-| **.ppt** | → searchable PDF | Converts to PDF first |
-| **.txt** | TextLoader | Plain text ingestion |
-| **.png** | OCR pipeline | EasyOCR + TrOCR + Tesseract |
-| **.jpg/.jpeg** | OCR pipeline | EasyOCR + TrOCR + Tesseract |
-
----
-
-## 🎨 Themes & UI
-
-### **Theme System**
-
-The frontend includes a CSS variable-based theming system supporting:
-
-- **Light Theme** (default)
-- **Dark Theme**
-- **Sepia Theme**
-- **HighContrast Theme**
-- **Custom Themes** (user-configurable)
-
-**Theme Variables:**
-```css
---app-bg, --page-bg, --sidebar-bg
---page-text, --muted-text, --page-border
---bubble-user-bg, --bubble-user-text
---bubble-ai-bg, --bubble-ai-text, --bubble-ai-border
---chat-bg
-```
-
-### **Responsive Design**
-
-- Mobile-first Tailwind CSS
-- Breakpoints: sm (640px), md (768px), lg (1024px)
-- Resizable chat panel (drag to resize)
-- Touch-friendly on tablets
-- PDF viewer optimized for all screen sizes
-
----
-
-## ⚙️ Configuration
-
-### **Key Config Files**
-
-| File | Purpose |
-|------|---------|
-| `.env` (Auth) | Database, JWT, email, CORS settings |
-| `.env` (RAG) | Ollama, chunking, embedding config |
-| `.env.local` (Frontend) | API URLs, Google OAuth client ID |
-| `vite.config.js` | Vite build configuration |
-| `tailwind.config.js` | Tailwind CSS (implicit) |
-
-### **Important Settings**
-
-**Backend - Auth Service:**
-- `JWT_ALGORITHM`: Default HS256
-- `PASSWORD_STRENGTH`: Min 8 chars + uppercase + lowercase + digit
-- `RATE_LIMITS`: signup 5/min, login 5/min, password reset 3/hour
-
-**Backend - RAG Service:**
-- `CHUNK_SIZE`: 400 (larger = more context per chunk)
-- `CHUNK_OVERLAP`: 80 (overlap to maintain continuity)
-- `EMBEDDING_DIM`: 768 (nomic-embed-text output)
-- `LLM_TEMPERATURE`: 0 (deterministic answers)
-
-**Frontend:**
-- `VITE_AUTH_API_URL`: Backend URL (must match CORS_ORIGINS)
-- `VITE_RAG_API_URL`: Document service URL
-- `VITE_GOOGLE_CLIENT_ID`: OAuth 2.0 credential
-
----
-
-## 🔧 Scripts
-
-### **Frontend**
-
-```bash
-npm run dev         # Start Vite dev server (HMR enabled)
-npm run build       # Production build (dist/)
-npm run lint        # Run ESLint on src/
-npm run preview     # Preview production build locally
-```
-
-### **Backend - Auth Service**
-
-```bash
-# In backend/Login_signup/
-
-# Start development server
-uvicorn main:app --reload
-
-# With custom host/port
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-
-# Production (use gunicorn or similar)
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app
-```
-
-### **Backend - Document Service**
-
-```bash
-# In backend/document_workspace/app/
-
-# Start development server
-uvicorn main:app --reload --port 8001
-
-# Download OCR models (one-time)
-python download\ models.py
-```
-
-### **Database Setup**
-
-```bash
-# Create databases
-mysql -u root -p -e "CREATE DATABASE minor_project_auth;"
-mysql -u root -p -e "CREATE DATABASE minor_project_documents;"
-
-# Tables auto-created by SQLAlchemy on first run
-```
-
----
-
-## 🚢 Deployment
-
-### **Local Deployment (Development)**
-
-1. **Start Ollama:**
-   ```bash
-   ollama serve
-   ```
-
-2. **Start MySQL:**
-   ```bash
-   # Linux/Mac
-   brew services start mysql
-
-   # Windows (if installed via Docker)
-   docker run -d -e MYSQL_ROOT_PASSWORD=password -p 3306:3306 mysql:8.0
-   ```
-
-3. **Terminal 1 - Auth Service:**
-   ```bash
-   cd backend/Login_signup
-   source venv/bin/activate  # or venv\Scripts\activate on Windows
-   uvicorn main:app --reload
-   ```
-
-4. **Terminal 2 - Document Service:**
-   ```bash
-   cd backend/document_workspace/app
-   source venv/bin/activate
-   uvicorn main:app --reload --port 8001
-   ```
-
-5. **Terminal 3 - Frontend:**
-   ```bash
-   cd frontend
-   npm run dev
-   ```
-
-6. **Access:**
-   - Frontend: http://localhost:5173
-   - Auth API: http://localhost:8000/docs
-   - RAG API: http://localhost:8001/docs
-
-### **Docker Deployment (Recommended for Production)**
-
-#### **Backend Dockerfile**
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY backend/requirement.txt .
-RUN pip install --no-cache-dir -r requirement.txt
-
-COPY backend/ ./
-
-CMD ["uvicorn", "Login_signup.main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-#### **Frontend Dockerfile**
-```dockerfile
-FROM node:18-alpine AS builder
-
-WORKDIR /app
-
-COPY frontend/package*.json ./
-RUN npm ci
-
-COPY frontend/ ./
-RUN npm run build
-
-FROM nginx:alpine
-
-COPY --from=builder /app/dist /usr/share/nginx/html
-EXPOSE 80
-
-CMD ["nginx", "-g", "daemon off;"]
-```
-
-#### **Docker Compose**
-```yaml
-version: "3.8"
-
-services:
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: rootpass
-      MYSQL_DATABASE: minor_project_auth
-    volumes:
-      - mysql_data:/var/lib/mysql
-
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-
-  auth_backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.auth
-    ports:
-      - "8000:8000"
-    environment:
-      DATABASE_URL: mysql+pymysql://root:rootpass@mysql:3306/minor_project_auth
-      JWT_SECRET: ${JWT_SECRET}
-      CORS_ORIGINS: http://localhost:5173,http://localhost:3000
-      FRONTEND_URL: http://localhost:5173
-    depends_on:
-      - mysql
-
-  rag_backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.rag
-    ports:
-      - "8001:8001"
-    environment:
-      DATABASE_URL: mysql+pymysql://root:rootpass@mysql:3306/minor_project_documents
-      OLLAMA_BASE_URL: http://ollama:11434
-      JWT_SECRET: ${JWT_SECRET}
-    depends_on:
-      - mysql
-      - ollama
-
-  frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-    ports:
-      - "80:80"
-    environment:
-      VITE_AUTH_API_URL: http://localhost:8000
-      VITE_RAG_API_URL: http://localhost:8001
-
-volumes:
-  mysql_data:
-  ollama_data:
-```
-
----
-
-## 🐛 Troubleshooting
-
-### **Common Issues**
-
-#### **1. "CORS_ORIGINS is not set"**
-- **Problem:** Backend starts with ValueError
-- **Solution:** Add `CORS_ORIGINS` to `.env` file
-  ```env
-  CORS_ORIGINS=http://localhost:5173,http://localhost:3000
-  ```
-
-#### **2. "JWT_SECRET not found"**
-- **Problem:** Auth service fails on startup
-- **Solution:** Generate a secure key and add to `.env`
-  ```bash
-  python -c "import secrets; print(secrets.token_urlsafe(32))"
-  ```
-
-#### **3. "Database connection refused"**
-- **Problem:** Cannot connect to MySQL
-- **Solution:** 
-  - Verify MySQL is running
-  - Check connection string in `.env`
-  - Ensure databases exist
-
-#### **4. "Embedding timeout" or "LLM timeout"**
-- **Problem:** Ollama is not responding
-- **Solution:**
-  - Verify `ollama serve` is running
-  - Check `OLLAMA_BASE_URL` in `.env`
-  - Ensure required models are pulled
-
-#### **5. OCR failing on images**
-- **Problem:** EasyOCR or TrOCR models not downloaded
-- **Solution:**
-  ```bash
-  cd backend/document_workspace
-  python "download models.py"
-  ```
-
-#### **6. "Access token expired"**
-- **Problem:** Token is no longer valid
-- **Solution:** Use refresh token to get new access token
-  ```bash
-  POST /refresh
-  {"refresh_token": "..."}
-  ```
-
-#### **7. Frontend cannot reach backend**
-- **Problem:** API URL is incorrect
-- **Solution:** Verify `.env.local` in frontend
-  ```env
-  VITE_AUTH_API_URL=http://localhost:8000
-  VITE_RAG_API_URL=http://localhost:8001
-  ```
-
-#### **8. "Email verification failed"**
-- **Problem:** SMTP configuration incorrect
-- **Solution:**
-  - Verify email credentials in `.env`
-  - For Gmail: Use app-specific password (not regular password)
-  - Enable "Less secure app access" if needed
-  - Check MAIL_SERVER and MAIL_PORT settings
-
-#### **9. "File upload too large"**
-- **Problem:** Document exceeds size limit
-- **Solution:**
-  - Increase `MAX_FILE_SIZE_MB` in `.env` (up to available disk space)
-  - Or split large documents before uploading
-
-#### **10. "PDF generation failed"**
-- **Problem:** ReportLab cannot generate PDF
-- **Solution:**
-  - Verify reportlab is installed: `pip install reportlab`
-  - Check file permissions on upload directory
-  - Ensure sufficient disk space
-
-### **Debugging Tips**
-
-1. **Check API Swagger UI:**
-   - Auth: http://localhost:8000/docs
-   - RAG: http://localhost:8001/docs
-
-2. **View Backend Logs:**
-   - uvicorn prints logs to console
-   - Watch for 500 errors and tracebacks
-
-3. **Check Browser Console:**
-   - Frontend JS errors
-   - Network tab for API requests
-
-4. **Test APIs with cURL:**
-   ```bash
-   curl -X POST http://localhost:8000/login \
-     -H "Content-Type: application/json" \
-     -d '{"email":"test@example.com","password":"Test123"}'
-   ```
-
-5. **Enable verbose logging:**
-   ```python
-   # In database.py, change:
-   engine = create_engine(DATABASE_URL, echo=True)  # Logs all SQL
-   ```
-
-6. **Check Docker logs:**
-   ```bash
-   docker-compose logs -f service_name
-   ```
-
----
-
-## 🔮 Future Improvements
-
-### **Planned Features**
-
-1. **Advanced Search**
-   - Full-text search across all documents
-   - Filter by date, author, tags
-   - Saved searches and filters
-
-2. **Collaboration**
-   - Share documents with teams
-   - Real-time collaborative editing
-   - Comments and annotations
-
-3. **Advanced Analytics**
-   - Document similarity/clustering
-   - Reading patterns and insights
-   - Productivity metrics
-
-4. **Enhanced OCR**
-   - Multi-language OCR support
-   - Layout preservation
-   - Table structure detection
-
-5. **Extended LLM Support**
-   - Support for multiple LLM backends (OpenAI, Anthropic)
-   - Fine-tuned models for specific domains
-   - Prompt templates library
-
-6. **Mobile App**
-   - Native iOS/Android app
-   - Offline document access
-   - Push notifications
-
-7. **Integrations**
-   - Cloud storage (Google Drive, OneDrive)
-   - Notion, Obsidian integration
-   - Slack notifications
-
-8. **Performance**
-   - Caching layer (Redis)
-   - Database query optimization
-   - Async document processing queue
-
-9. **Accessibility**
-   - Screen reader optimization
-   - Keyboard navigation
-   - High contrast themes
-
-10. **Security Enhancements**
-    - Two-factor authentication (2FA)
-    - Document encryption
-    - Audit logging
 
 ---
 
@@ -1800,69 +1045,41 @@ volumes:
 
 We welcome contributions! Here's how to get started:
 
-### **Development Workflow**
+1. **Fork the repository**
+2. **Create a feature branch** (`git checkout -b feature/amazing-feature`)
+3. **Commit changes** (`git commit -m 'Add amazing feature'`)
+4. **Push to branch** (`git push origin feature/amazing-feature`)
+5. **Open a Pull Request**
 
-1. **Fork the repository** on GitHub
-2. **Create a feature branch:**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-3. **Make your changes** following the code style
-4. **Test thoroughly:**
-   - Run linters: `npm run lint` (frontend), `pylint` (backend)
-   - Test APIs with provided Swagger UI
-   - Test on different screen sizes
-5. **Commit with clear messages:**
-   ```bash
-   git commit -m "feat: add new feature" -m "Detailed description"
-   ```
-6. **Push and create a Pull Request:**
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-### **Code Standards**
-
-- **Frontend:** ESLint configured, follow Tailwind conventions
-- **Backend:** PEP 8 Python style, type hints recommended
-- **Commit Messages:** Use conventional commits (feat:, fix:, docs:, etc.)
-
-### **Testing**
-
-- Test auth flows before/after changes
-- Test document upload with various file types
-- Verify RAG responses are accurate
-- Test on mobile viewport
+### **Development Guidelines**
+- Follow existing code style and patterns
+- Add tests for new features
+- Update documentation accordingly
+- Test thoroughly before submitting PR
 
 ---
 
-## 📄 License
+## 📝 License
 
-This project is open-source and available under the [MIT License](LICENSE).
-
----
-
-## 📞 Support & Contact
-
-- **Issues:** [GitHub Issues](https://github.com/sapanajoshi140-ux/Minor-Project/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/sapanajoshi140-ux/Minor-Project/discussions)
-- **Email:** contact@sapanajoshi.dev (if available)
+This project is licensed under the **MIT License** - see the LICENSE file for details.
 
 ---
 
 ## 🙏 Acknowledgments
 
-This project incorporates:
-- **Ollama** for open-source LLM inference
-- **ChromaDB** for vector database
-- **LangChain** for RAG utilities
-- **FastAPI** for modern async web framework
-- **React + Tailwind CSS** for beautiful frontend
-- **Open-source OCR** (EasyOCR, TrOCR, Tesseract)
+- **Ollama** for the amazing open-source LLM infrastructure
+- **ChromaDB** for efficient vector database
+- **React** and **FastAPI** communities
+- **All contributors** who help improve this project
 
 ---
 
-**Last Updated:** May 24, 2025  
-**Version:** 1.0.0  
-**Status:** Active Development
+## 📧 Contact & Support
 
+For questions, issues, or suggestions:
+- **GitHub Issues:** [Report Issues](https://github.com/sapanajoshi140-ux/Minor-Project/issues)
+- **Email:** sapanajoshi140@gmail.com
+
+---
+
+**Happy Reading! 📖✨**
